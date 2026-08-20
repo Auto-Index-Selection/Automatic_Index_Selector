@@ -1,6 +1,7 @@
 venv
 .env
 workspace
+results
 
 indexes/*.sql
 
