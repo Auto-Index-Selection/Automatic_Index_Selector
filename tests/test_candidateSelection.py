@@ -1,8 +1,8 @@
-from ilp_imp.candidateSelection.chaudhuri import *
+from auto_index_selector.CandidateGeneration.chaudhuri import *
 
-from ilp_imp.workload import *
+from auto_index_selector.workload import *
 
-from ilp_imp.workload import getWorkload
+from auto_index_selector.workload import getWorkload
 from pyprojroot import here
 import os
 from dotenv import load_dotenv

@@ -1,6 +1,6 @@
 import psycopg2
-from auto_index_selector.CandidateSelection.cs_naive import numericIndex
-from auto_index_selector.CandidateSelection.cs_rule_based import generateCandidateIndexes
+from auto_index_selector.CandidateGeneration.cg_naive import numericIndex
+from auto_index_selector.CandidateGeneration.cg_rule_based import generateCandidateIndexes
 from auto_index_selector.ConfigEnumeration.configGeneration import *
 import os
 from dotenv import load_dotenv

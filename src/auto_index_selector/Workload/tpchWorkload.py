@@ -82,7 +82,7 @@ tpch_schema = {
 }
 def getWorkload():
     workloadPath = str(here() /"workload"  /  "queries_tpch")
-    print(workloadPath)
+    # print(workloadPath)
     queries = []
     workloadPath = Path(workloadPath)
     for sql_file in sorted(workloadPath.glob("*.sql")):

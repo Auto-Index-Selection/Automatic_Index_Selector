@@ -1,10 +1,10 @@
 import psycopg2
-from ilp_imp.candidateSelection.candidateSelection import *
-from ilp_imp.candidateSelection.ruleBasedCS import *
-from ilp_imp.configGeneration import *
-from ilp_imp.costEstimator import *
+from auto_index_selector.CandidateGeneration.candidateSelection import *
+from auto_index_selector.CandidateGeneration.ruleBasedCS import *
+from auto_index_selector.configGeneration import *
+from auto_index_selector.costEstimator import *
 import os
-from ilp_imp.workload import *
+from auto_index_selector.workload import *
 from pyprojroot import here
 import os
 from dotenv import load_dotenv

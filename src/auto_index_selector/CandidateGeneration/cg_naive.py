@@ -2,7 +2,7 @@
 # Candidate Selection #
 #######################
 from typing import List
-from auto_index_selector.candidateSelection.dexter import runDexter
+from auto_index_selector.CandidateGeneration.dexter import runDexter
 
 
 

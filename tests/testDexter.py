@@ -1,5 +1,5 @@
 import psycopg2
-from ilp_imp.candidateSelection.candidateSelection import *
+from auto_index_selector.CandidateGeneration.candidateSelection import *
 import os
 from dotenv import load_dotenv
 

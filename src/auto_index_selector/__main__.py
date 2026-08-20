@@ -19,6 +19,7 @@ from pyprojroot import here
 import psycopg2
 from dotenv import load_dotenv
 import os
+from auto_index_selector.utility import *
 
 # tomllib is stdlib from Python 3.11+; fall back to the tomli backport
 # for older interpreters.
@@ -37,7 +38,7 @@ SECTION_TO_PACKAGE = {
 
 # DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.toml"
 DEFAULT_CONFIG_PATH = Path(str(here() / "config.toml"))
-print(DEFAULT_CONFIG_PATH)
+
 
 def load_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict:
     """Load and parse config.toml."""
@@ -99,9 +100,9 @@ def main():
     cs_module = pipeline["config_selection"]
     wl_module = pipeline["workload"]
 
-    print(f"[CandidateGeneration] using module: {cg_module.__name__}")
-    print(f"[ConfigSelection]     using module: {cs_module.__name__}")
-    print(f"[Workload]            using module: {wl_module.__name__}")
+    # print(f"[CandidateGeneration] using module: {cg_module.__name__}")
+    # print(f"[ConfigSelection]     using module: {cs_module.__name__}")
+    # print(f"[Workload]            using module: {wl_module.__name__}")
 
     # --- Wire the pipeline together below ---
     # These calls assume each stage module exposes a conventional entry
@@ -133,16 +134,19 @@ def main():
 
     # candidate generation
     candidateIndexes = cg_module.generateCandidateIndexes(W, schema)
-    print(candidateIndexes)
+    # print(candidateIndexes)
     print("Candidate Indexex Generated.........")
 
     # config selection
     config = cs_module.greedyMK(conn, W, candidateIndexes, m=2, k=10)
-    print(config)
+    # print(config)
 
 
-    # todo
     # generate :  create_index.sql, delete_index.sql
+    create_path = generate_create_index_sql(config)
+    delete_path = generate_delete_index_sql(config)
+    print(f"Wrote {create_path}")
+    print(f"Wrote {delete_path}")
 
     if TEST:
         pass
