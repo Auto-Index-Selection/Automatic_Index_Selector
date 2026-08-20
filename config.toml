@@ -1,0 +1,16 @@
+# config.toml
+# Selects which implementation module to use for each pluggable stage
+# of the auto_index_selector pipeline. `main.py` reads this file and
+# dynamically imports the chosen module for each stage.
+
+[candidate_generation]
+# One of: cg_auto_admin, cg_dta, cg_naive, cg_rule_based, dexter
+module = "cg_rule_based"
+
+[config_selection]
+# One of: config_sel  (add more as new strategies are implemented)
+module = "cs_greedy"
+
+[workload]
+# One of: tpchWorkload  (add more as new workloads are implemented)
+module = "tpchWorkload"
