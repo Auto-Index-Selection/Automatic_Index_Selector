@@ -1,6 +1,6 @@
 from typing import *
 import sqlglot
-from auto_index_selector.costEstimator import *
+from auto_index_selector.CostEstimator.costEstimator import *
 from itertools import combinations
 
 def getTablesIn(query: str) -> List:

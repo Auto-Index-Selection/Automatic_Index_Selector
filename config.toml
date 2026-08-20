@@ -4,13 +4,22 @@
 # dynamically imports the chosen module for each stage.
 
 [candidate_generation]
-# One of: cg_auto_admin, cg_dta, cg_naive, cg_rule_based, dexter
+# Possible values: cg_auto_admin, cg_dta, cg_rule_based, cg_extend
 module = "cg_rule_based"
-
+ 
 [config_selection]
-# One of: config_sel  (add more as new strategies are implemented)
+# Possible values: cs_greedy, cs_drop, cs_extend
 module = "cs_greedy"
-
+ 
+[config_selection.cs_greedy]
+# m -> (seed), k-> (limit on number of candidate indexes)
+m = 2
+k = 10
+ 
+[config_selection.cs_other]
+# s -> storage budget
+s = 400
+ 
 [workload]
-# One of: tpchWorkload  (add more as new workloads are implemented)
+# Possible values: tpchWorkload, tpcdsWorkload, tpccWorkload
 module = "tpchWorkload"

@@ -89,35 +89,33 @@ def load_pipeline(config_path: Path = DEFAULT_CONFIG_PATH):
     for section in SECTION_TO_PACKAGE:
         pipeline[section] = import_selected_module(section, config)
 
-    return pipeline
+    return pipeline, config
+
+def get_module_params(section: str, config: dict) -> dict:
+    module_name = config[section]["module"]
+    return config[section].get(module_name, {})
 
 TEST = False
 
 def main():
-    pipeline = load_pipeline()
+    pipeline, config = load_pipeline()
 
     cg_module = pipeline["candidate_generation"]
     cs_module = pipeline["config_selection"]
     wl_module = pipeline["workload"]
 
-    # print(f"[CandidateGeneration] using module: {cg_module.__name__}")
-    # print(f"[ConfigSelection]     using module: {cs_module.__name__}")
-    # print(f"[Workload]            using module: {wl_module.__name__}")
+    # workload
+    # import wl_modul
+    W, DB_NAME, schema = wl_module.getWorkload()
+    # print(W)
+    # print(schema)
+    print("Loaded Workload...........")
 
-    # --- Wire the pipeline together below ---
-    # These calls assume each stage module exposes a conventional entry
-    # point (e.g. a function named `run(...)`). Adjust to match your
-    # actual module APIs (cg_auto_admin.py, config_sel.py, tpchWorkload.py, etc.)
-    #
-    # workload = wl_module.load_workload()
-    # candidates = cg_module.generate_candidates(workload)
-    # selected_config = cs_module.select_config(candidates, workload)
-    # print(selected_config)
-    
     # connection setup
     load_dotenv()
+
     conn = psycopg2.connect(
-        dbname=os.getenv("DB_NAME"),
+        dbname=DB_NAME,
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD"),
         host=os.getenv("DB_HOST"),
@@ -125,20 +123,14 @@ def main():
     )
     print("Connection established successfully!")
 
-    # workload
-    # import wl_modul
-    W, schema = wl_module.getWorkload()
-    # print(W)
-    # print(schema)
-    print("Loaded Workload...........")
-
     # candidate generation
     candidateIndexes = cg_module.generateCandidateIndexes(W, schema)
     # print(candidateIndexes)
     print("Candidate Indexex Generated.........")
 
     # config selection
-    config = cs_module.greedyMK(conn, W, candidateIndexes, m=2, k=10)
+    cs_params = get_module_params("config_selection", config)
+    config = cs_module.selectConfiguration(conn, W, candidateIndexes, **cs_params)
     # print(config)
 
 

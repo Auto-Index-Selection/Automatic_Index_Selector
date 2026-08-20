@@ -150,68 +150,6 @@ def applyRule3(q, schema):
     # print(result)
     return result
 
-# def applyRule4(J, EQ, RANGE):
-    result = OrderedSet()
-
-    j = OrderedDict()
-    eq = OrderedDict()
-    r = OrderedDict()
-
-    for idx in J:
-        # print(idx)
-        table = idx.split('.')[0]
-        columns = idx.split('.')[1]\
-            [1:-1]
-        if table not in j.keys():
-            j[table] = []
-        j[table].append(columns)
-    
-    # print(j)
-
-    for idx in EQ:
-        # print(idx)
-        table = idx.split('.')[0]
-        columns = idx.split('.')[1]\
-            [1:-1]
-        if table not in eq.keys():
-            eq[table] = []
-        eq[table].append(columns)
-        
-    # print(eq)
-
-    for idx in RANGE:
-        # print(idx)
-        table = idx.split('.')[0]
-        columns = idx.split('.')[1]\
-            [1:-1]
-        if table not in r.keys():
-            r[table] = []
-        r[table].append(columns)
-        
-    # print(r)
-    # print()
-    # j + eq + r
-    for table, candidates in j.items():
-        if table in eq.keys() and table in r.keys():
-            print(j[table])
-            print(eq[table])
-            print(r[table])
-            print()
-    print('-'*82)
-    # eq + r
-
-
-    # j + r
-
-
-    # j + eq
-
-
-    return result
-
-# def applyRule5():
-    result = OrderedSet()
-    return result
 
 def applyRule4(J: OrderedSet, EQ: OrderedSet, RANGE: OrderedSet) -> OrderedSet:
     result = OrderedSet()

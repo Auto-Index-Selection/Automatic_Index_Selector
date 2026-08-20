@@ -94,4 +94,4 @@ def getWorkload():
             queries.append(query)
         # print(sql_file)
     # print(queries)
-    return queries, tpch_schema
+    return queries, 'tpch', tpch_schema
