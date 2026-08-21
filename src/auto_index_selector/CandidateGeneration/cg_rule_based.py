@@ -73,6 +73,11 @@ def getOCols(q: str, schema: Dict) ->OrderedSet:
                result.add(normalized_col)
     return result
 
+def _stripBrackets(label: str) -> Tuple[str, str]:
+    '''table.[col] -> (table, col)'''
+    table, bracketed = label.split('.', 1)
+    return table, bracketed[1:-1]
+
 def applyRule1(J, EQ, RANGE):
     result = OrderedSet()
     result |= (J | EQ | RANGE)
@@ -84,7 +89,6 @@ def applyRule2(O:OrderedSet) ->OrderedSet:
     tables = OrderedSet()
     for ci in O:
         tables.add(ci.split('.')[0])
-    # print(tables)
     if len(tables) != 1:
         return result
     table = next(iter(O)).split('.')[0]
@@ -139,9 +143,9 @@ def applyRule3(q, schema):
             for col in idx.split(','):
                 # print(col)
                 columns += col + ','
-            columns = columns[:-1] + ']'
+        columns = columns[:-1] + ']'
             # print(columns)
-            result.add(columns)
+        result.add(columns)
     # print("")
     # print(result)
     return result

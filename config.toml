@@ -5,7 +5,7 @@
 
 [candidate_generation]
 # Possible values: cg_auto_admin, cg_dta, cg_rule_based, cg_extend
-module = "cg_dta"
+module = "cg_rule_based"
  
 [config_selection]
 # Possible values: cs_greedy, cs_drop, cs_extend
@@ -22,4 +22,4 @@ s = 400
  
 [workload]
 # Possible values: tpchWorkload, tpcdsWorkload, tpccWorkload
-module = "tpchWorkload"
+module = "tpcdsWorkload"
