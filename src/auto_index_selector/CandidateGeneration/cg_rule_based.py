@@ -23,13 +23,9 @@ def getJoinCols(q: str, schema: Dict) ->OrderedSet:
 
     # extract joins
     for joins in parsed_query.find_all(sg.exp.Join):
-        # print(joins)
         on_clause = joins.args.get("on")
-        # print(on_clause)
         if on_clause:
-            # print('Join on : ')
             for column in on_clause.find_all(sg.exp.Column):
-                # print(f'\tname : {column.name}')
                 normalized_col = normalizeColumn(column.name, schema)
                 if normalized_col == '':
                     continue

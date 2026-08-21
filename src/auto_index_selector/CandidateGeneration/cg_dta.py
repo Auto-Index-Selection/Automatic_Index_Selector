@@ -96,16 +96,7 @@ def setToDict(s: OrderedSet) -> Dict:
     return result
 
 
-# --------------------------------------------------------------------------- #
-# DTA-style candidate construction (Section 4, "Candidate Selection")
-#
-# Everything below replaces the old CIKM'20-style applyRule1..5 functions.
-# DTA builds candidates one query at a time (not by pooling predicates
-# across the whole workload first), so each helper below takes a single
-# query's J/EQ/RANGE/O sets. generateCandidateIndexes() loops over the
-# workload and unions the per-query results, matching the paper's
-# "Candidate Selection is performed on one query at a time" (Section 4).
-# --------------------------------------------------------------------------- #
+
 
 Selectivity = Dict[str, float]  # 'table.[col]' -> selectivity in (0, 1], smaller = more selective
 
@@ -129,8 +120,6 @@ def _orderBySelectivity(labels: List[str], selectivity: Optional[Selectivity]) -
     Order column labels ('table.[col]') by estimated selectivity, most
     selective (smallest fraction) first -- mirrors DTA ordering selection
     columns "by estimated selectivity of the predicate on that column"
-    (Section 4). Falls back to original (query) order when no selectivity
-    estimates are supplied.
     '''
     if not selectivity:
         return list(labels)

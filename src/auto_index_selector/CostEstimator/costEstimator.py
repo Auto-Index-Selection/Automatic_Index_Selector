@@ -351,6 +351,7 @@ def createCompositeHypoIndexes(conn, configuration):
         for table, cols in configuration:
             col_list = ",".join(cols)
             stmt = f"CREATE INDEX ON {table}({col_list})"
+            # print(stmt)
             cur.execute("SELECT * FROM hypopg_create_index(%s);", (stmt,))
 
 

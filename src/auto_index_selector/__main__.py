@@ -126,12 +126,13 @@ def main():
     # candidate generation
     candidateIndexes = cg_module.generateCandidateIndexes(W, schema)
     # print(candidateIndexes)
-    print("Candidate Indexex Generated.........")
+    print(f"Candidate Indexex Generated......... {len(candidateIndexes)}")
 
     # config selection
     cs_params = get_module_params("config_selection", config)
+    print(cs_params)
     config = cs_module.selectConfiguration(conn, W, candidateIndexes, **cs_params)
-    # print(config)
+    print(config)
 
 
     # generate :  create_index.sql, delete_index.sql
