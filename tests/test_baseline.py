@@ -16,7 +16,7 @@ import auto_index_selector.Workload.tpcdsWorkload as wl_module
 import time
 import csv
 
-ITERATIONS = 5
+ITERATIONS = 1
 DEFAULT_QUERY_TIMINGS_PATH = Path(str(here() / 'results' / 'baseline'  / 'tpcds'))
 DEFAULT_TOTAL_TIMINGS_PATH = Path(str(here() / 'results' / 'baseline'  / 'tpcds_total'))
 def execute_sql_file(conn, path: Path) -> None:
