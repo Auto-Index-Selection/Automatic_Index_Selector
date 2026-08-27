@@ -9,8 +9,32 @@ module = "cg_rule_based"
 
 [config_selection]
 # One of: config_sel  (add more as new strategies are implemented)
-module = "cs_greedy"
+module = "config_sel"
 
 [workload]
-# One of: tpchWorkload  (add more as new workloads are implemented)
+# One of: tpchWorkload (loads .sql files from disk), pgStatStatementsWorkload (loads live queries from pg_stat_statements)
 module = "tpchWorkload"
+
+[write_penalty]
+# Set to true to enable the B-tree write penalty estimator.
+# Requires the advisor_write_stats extension to be loaded via
+# shared_preload_libraries in postgresql.conf.
+enabled = false
+
+# Operational mode: "simulate" (runs DML templates for demo/offline) or "live" (passive monitoring)
+mode = "simulate"
+
+# Analytical scaling factor for observed write counts (e.g., 100.0
+# to project a 100x OLTP write volume from the observed workload).
+write_scale = 1.0
+
+# --- Live Mode Options (used when mode = "live") ---
+# Observation window in seconds to capture live background traffic (0 = no wait)
+window_duration_seconds = 0
+
+# --- Simulation Mode Options (used when mode = "simulate") ---
+dml_dir = "workload/sql/dml"
+simulation_mode = "random"     # "random" or "sequential"
+simulation_rounds = 50         # number of DML operations to execute
+simulation_seed = 42           # RNG seed for repeatable parameters
+simulation_timeout = 30        # Per-query timeout in seconds for simulation 

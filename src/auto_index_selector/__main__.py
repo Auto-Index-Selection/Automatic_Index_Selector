@@ -15,7 +15,12 @@ pointing config.toml at its module name (no ".py" extension).
 import sys
 import importlib
 from pathlib import Path
-from pyprojroot import here
+try:
+    from pyprojroot import here
+except ImportError:
+    def here() -> Path:
+        return Path(__file__).resolve().parent.parent.parent.parent
+
 import psycopg2
 from dotenv import load_dotenv
 import os
@@ -35,9 +40,19 @@ SECTION_TO_PACKAGE = {
     "workload": "auto_index_selector.Workload",
 }
 
-# DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.toml"
-DEFAULT_CONFIG_PATH = Path(str(here() / "config.toml"))
-print(DEFAULT_CONFIG_PATH)
+def _find_config_path() -> Path:
+    candidates = [
+        Path.cwd() / "config.toml",
+        Path(__file__).resolve().parent.parent.parent.parent / "config.toml",
+        Path(str(here() / "Automatic_Index_Selector" / "config.toml")),
+        Path(str(here() / "config.toml")),
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return candidates[0]
+
+DEFAULT_CONFIG_PATH = _find_config_path()
 
 def load_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict:
     """Load and parse config.toml."""
@@ -93,6 +108,7 @@ def load_pipeline(config_path: Path = DEFAULT_CONFIG_PATH):
 TEST = False
 
 def main():
+    cfg = load_config()
     pipeline = load_pipeline()
 
     cg_module = pipeline["candidate_generation"]
@@ -124,11 +140,68 @@ def main():
     )
     print("Connection established successfully!")
 
+    # --- Write penalty estimator setup (optional) ---
+    wp_config = cfg.get("write_penalty", {})
+    wp_enabled = wp_config.get("enabled", False)
+    wp_estimator = None
+    snap_before = None
+
+    if wp_enabled:
+        import time
+        from auto_index_selector.CostEstimator.write_penalty_estimator import WritePenaltyEstimator
+        mode = wp_config.get("mode", "simulate")
+        write_scale = float(wp_config.get("write_scale", 1.0))
+        wp_estimator = WritePenaltyEstimator(conn, write_scale=write_scale)
+        wp_estimator.ensure_extension()
+        snap_before = wp_estimator.snapshot()
+        print(f"[WritePenalty] Mode='{mode}', before-snapshot captured (scale={write_scale})")
+
+        # In SIMULATE mode: run synthetic DML workload replay for demo/offline with timeout
+        if mode == "simulate":
+            from auto_index_selector.Workload.dml_runner import DMLWorkloadRunner
+            sim_timeout = int(wp_config.get("simulation_timeout", 30))
+            if sim_timeout > 0:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(f"SET statement_timeout = {sim_timeout * 1000};")
+                    print(f"[Simulation] Set PostgreSQL statement_timeout = {sim_timeout}s")
+                except Exception as e:
+                    pass
+
+            dml_runner = DMLWorkloadRunner(
+                conn=conn,
+                dml_dir=wp_config.get("dml_dir", "workload/sql/dml"),
+                mode=wp_config.get("simulation_mode", "random"),
+                rounds=int(wp_config.get("simulation_rounds", 50)),
+                seed=int(wp_config.get("simulation_seed", 42)),
+                statement_timeout_ms=sim_timeout * 1000 if sim_timeout > 0 else 0,
+            )
+            rounds = wp_config.get("simulation_rounds", 50)
+            print(f"[WritePenalty] Simulating {rounds} DML operations...")
+            dml_runner.run()
+
+            # Reset timeout back to default after simulation completes
+            if sim_timeout > 0:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SET statement_timeout = 0;")
+                except Exception:
+                    pass
+
+        # In LIVE mode: optionally sleep for observation window
+        elif mode == "live":
+            duration = int(wp_config.get("window_duration_seconds", 0))
+            if duration > 0:
+                print(f"[WritePenalty] Monitoring live database for {duration}s...")
+                time.sleep(duration)
+
     # workload
-    # import wl_modul
-    W, schema = wl_module.getWorkload()
-    # print(W)
-    # print(schema)
+    import inspect
+    sig = inspect.signature(wl_module.getWorkload)
+    if 'conn' in sig.parameters:
+        W, schema = wl_module.getWorkload(conn=conn)
+    else:
+        W, schema = wl_module.getWorkload()
     print("Loaded Workload...........")
 
     # candidate generation
@@ -136,9 +209,20 @@ def main():
     print(candidateIndexes)
     print("Candidate Indexex Generated.........")
 
+    # --- Write penalty computation (if enabled) ---
+    write_penalties = {}
+    if wp_enabled and wp_estimator and snap_before:
+        snap_after = wp_estimator.snapshot()
+        delta = wp_estimator.compute_delta(snap_before, snap_after)
+        write_penalties = wp_estimator.estimate_penalties(candidateIndexes, delta)
+        print(f"[WritePenalty] Computed penalties for {len(write_penalties)} candidate indexes")
+        for idx_key, penalty in sorted(write_penalties.items(), key=lambda x: -x[1]):
+            if penalty > 0:
+                print(f"  {idx_key[0]}.({','.join(idx_key[1])}): penalty = {penalty:.4f}")
+
     # config selection
-    config = cs_module.greedyMK(conn, W, candidateIndexes, m=2, k=10)
-    print(config)
+    selected = cs_module.greedyMK(conn, W, candidateIndexes, m=2, k=10, write_penalties=write_penalties)
+    print(selected)
 
 
     # todo

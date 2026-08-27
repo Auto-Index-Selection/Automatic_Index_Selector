@@ -233,24 +233,26 @@ def estimateWorkloadCostForConfig(conn, W, configuration):
     return total
 
 
-def greedyMK(conn, W, candidate_dict, m, k, cost_cache=None):
+def greedyMK(conn, W, candidate_dict, m, k, cost_cache=None, write_penalties=None):
     """
     Greedy(m, k) enumeration algorithm (Chaudhuri & Narasayya, Section 5),
-    adapted to the table -> [[col,...], ...] candidate format.
+    adapted to the table -> [[col,...], ...] candidate format with write penalty support.
 
     Parameters
     ----------
-    conn           : psycopg2 connection
-    W              : list[str] SQL queries (the workload)
-    candidate_dict : dict(table -> list[list[str]])
-                     your existing candidate-index structure
-    m              : size of the exhaustively-searched seed configuration.
+    conn            : psycopg2 connection
+    W               : list[str] SQL queries (the workload)
+    candidate_dict  : dict(table -> list[list[str]])
+                      your existing candidate-index structure
+    m               : size of the exhaustively-searched seed configuration.
                       m=2 is the paper's recommended default.
-    k              : final number of indexes to pick
-    cost_cache     : optional dict for memoizing frozenset(config) -> cost.
+    k               : final number of indexes to pick
+    cost_cache      : optional dict for memoizing frozenset(config) -> cost.
                       Pass {} in if sweeping parameters repeatedly so you
                       don't re-hit HypoPG+optimizer for configs you've
                       already scored.
+    write_penalties : dict, optional
+                      pre-computed write penalties: {(table, (col1, ...)): penalty_float}
 
     Returns
     -------
@@ -261,10 +263,20 @@ def greedyMK(conn, W, candidate_dict, m, k, cost_cache=None):
 
     candidate_indexes = flattenCandidateIndexes(candidate_dict)
 
+    # Obtain write penalty map via standard CostEstimator function
+    penalties = estimateWorkloadCostUpdate(conn, W, candidate_dict, write_penalties=write_penalties)
+
+    def config_write_penalty(config):
+        if not penalties:
+            return 0.0
+        return sum(penalties.get(idx, 0.0) for idx in config)
+
     def cost(config):
         key = frozenset(config)
         if key not in cost_cache:
-            cost_cache[key] = estimateWorkloadCostForConfig(conn, W, key)
+            read_cost = estimateWorkloadCostForConfig(conn, W, key)
+            write_cost = config_write_penalty(key)
+            cost_cache[key] = read_cost + write_cost
         return cost_cache[key]
 
     m = min(m, k, len(candidate_indexes))

@@ -1,5 +1,9 @@
 from pathlib import Path
-from pyprojroot import here
+try:
+    from pyprojroot import here
+except ImportError:
+    def here() -> Path:
+        return Path(__file__).resolve().parent.parent.parent.parent
 
 tpch_schema = {
     "region": {
@@ -81,10 +85,19 @@ tpch_schema = {
     }
 }
 def getWorkload():
-    workloadPath = str(here() /"workload"  /  "queries_tpch")
-    print(workloadPath)
+    candidates = [
+        Path.cwd() / "workload" / "queries_tpch",
+        Path(__file__).resolve().parent.parent.parent.parent / "workload" / "queries_tpch",
+        Path(str(here() / "workload" / "queries_tpch")),
+        Path(str(here() / "Automatic_Index_Selector" / "workload" / "queries_tpch")),
+    ]
+    workloadPath = candidates[0]
+    for p in candidates:
+        if p.exists():
+            workloadPath = p
+            break
+    print(f"Workload directory: {workloadPath}")
     queries = []
-    workloadPath = Path(workloadPath)
     for sql_file in sorted(workloadPath.glob("*.sql")):
 
         with open(sql_file, "r") as f:

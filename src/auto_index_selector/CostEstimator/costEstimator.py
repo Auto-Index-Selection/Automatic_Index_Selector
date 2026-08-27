@@ -7,10 +7,21 @@ import psycopg2
 import threading
 import time
 import multiprocessing as mp
-from tqdm import tqdm
-from dotenv import load_dotenv
+try:
+    from tqdm import tqdm
+except ImportError:
+    class tqdm:
+        def __init__(self, *args, **kwargs): pass
+        def update(self, *args, **kwargs): pass
+        def close(self): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
 
+from dotenv import load_dotenv
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------ #
 # Reusable threaded progress bar helper (single-connection loops)
@@ -121,15 +132,25 @@ def createHypoIndexesCS(conn, configuration):
                 f"SELECT * FROM hypopg_create_index('{index}');",
             )
 
-def getQueryCost(conn, query):
+def getQueryCost(conn, query, fallback_cost: float = 1e9) -> float:
     """
     Returns PostgreSQL optimizer cost.
+    If a query fails or times out, safely rolls back the transaction and returns fallback_cost.
     """
     explain_query = f"EXPLAIN (FORMAT JSON) {query}"
-    with conn.cursor() as cur:
-        cur.execute(explain_query)
-        result = cur.fetchone()
-    return float(result[0][0]["Plan"]["Total Cost"])
+    try:
+        with conn.cursor() as cur:
+            cur.execute(explain_query)
+            result = cur.fetchone()
+            if result and result[0]:
+                return float(result[0][0]["Plan"]["Total Cost"])
+    except Exception as exc:
+        if conn:
+            conn.rollback()
+        logger.warning("Query cost estimation failed or timed out: %s. Assigned fallback cost.", exc)
+        return fallback_cost
+
+    return fallback_cost
 
 
 def estimateConfigurationCost(conn, query, configuration):
@@ -299,9 +320,34 @@ def estimateWorkloadCost(conn, W, configurations, indexSet, db_params=None, n_wo
     return cost_init, cost_final
 
 
-## This needs to be implemented
-def estimateWorkloadCostUpdate(conn, W, configurations):
-    return dict()
+def estimateWorkloadCostUpdate(conn, W, configurations, write_penalties=None):
+    """Return per-index write maintenance penalties for the workload.
+
+    When the write_penalty feature is enabled, `write_penalties` is a
+    pre-computed dict from WritePenaltyEstimator:
+        {(table, (col1, col2, ...)): penalty_cost_float, ...}
+
+    This function serves as the single access point for write penalty
+    data — any algorithm (GreedyMK, ILP, or future) should call this
+    function to obtain write costs rather than computing them directly.
+
+    Parameters
+    ----------
+    conn            : psycopg2 connection (unused, kept for interface consistency)
+    W               : workload queries (unused, kept for interface consistency)
+    configurations  : candidate configurations (unused, kept for interface consistency)
+    write_penalties : dict, optional
+        Pre-computed write penalties from WritePenaltyEstimator.
+        When None or empty, no write penalty is applied.
+
+    Returns
+    -------
+    dict : {(table, (col1, ...)): penalty_float}
+           Empty dict when write penalty is disabled.
+    """
+    if write_penalties is None:
+        return dict()
+    return write_penalties
 
 def createHypoIndexStorage(conn, indexes, table):
     idxs = list()
