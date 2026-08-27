@@ -211,7 +211,7 @@ def buildGroupOrderCandidate(O: OrderedSet) -> OrderedSet:
     return result
 
 
-def generateCandidateIndexes(W: List, schema: Dict, selectivity: Optional[Selectivity] = None) -> Dict:
+def generateCandidateIndexes(conn, W: List, schema: Dict, selectivity: Optional[Selectivity] = None) -> Dict:
     '''
     Input :
         W -> workload as a List of SQL strings

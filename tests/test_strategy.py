@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import os
 from auto_index_selector.utility import *
 
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python < 3.11
@@ -15,8 +16,9 @@ except ModuleNotFoundError:  # Python < 3.11
 import auto_index_selector.Workload.tpcdsWorkload as wl_module
 import time
 import csv
+import importlib
 
-ITERATIONS = 1
+ITERATIONS = 3
 DEFAULT_QUERY_TIMINGS_PATH = Path(str(here() / 'results' / 'rb_g'  / 'tpcds'))
 DEFAULT_TOTAL_TIMINGS_PATH = Path(str(here() / 'results' / 'rb_g'  / 'tpcds_total'))
 def execute_sql_file(conn, path: Path) -> None:
@@ -33,6 +35,7 @@ def execute_sql_file(conn, path: Path) -> None:
 def measure_workload(conn, W, iterations):
     results = []
     for it in range(1, iterations + 1):
+        print(f"Iteration {it}", end=" : ")
         timings = {}
         iter_total = 0.0
         with conn.cursor() as cur:
@@ -48,12 +51,13 @@ def measure_workload(conn, W, iterations):
  
                 timings[label] = elapsed
                 iter_total += elapsed
+                print(f"{i}", end=', ')
         conn.commit()
- 
+        print("")
         print(f"[Iteration {it}] total: {iter_total:.4f}s")
         for label, elapsed in timings.items():
             print(f"    {label}: {elapsed:.4f}s")
- 
+        print("")
         results.append({"iteration": it, "timings": timings, "total": iter_total})
  
     return results
@@ -153,7 +157,59 @@ def main():
     delete_path = Path(str(here() / 'indexes' / 'delete_index.sql'))
     execute_sql_file(conn, delete_path)
     print(f"Dropped indexes using {delete_path}")
-    
 
-if __name__ == "__main__":
-    sys.exit(main())
+def exp_k(conn, cg, cs, w, w_name, k, m):
+    all_results = measure_workload(conn, w, iterations=ITERATIONS)
+    avg_total = sum(r["total"] for r in all_results) / len(all_results)
+    print(f"\nAverage total time over {ITERATIONS} iterations: {avg_total:.4f}s")
+
+    query_csv_path = write_query_timings_csv(all_results, Path(str(here()) / 'results' / f'{w_name}_{cg}_{cs}_{k}_{m}_qt.csv'))
+    total_csv_path = write_total_timings_csv(all_results, Path(str(here()) / 'results' / f'{w_name}_{cg}_{cs}_{k}_{m}_avg.csv'))
+    print(f"Wrote per-query average timings to {query_csv_path}")
+    print(f"Wrote average total workload timing to {total_csv_path}")
+    pass
+
+def exp_size(conn, cg, cs, w, w_name, storage):
+    all_results = measure_workload(conn, w, iterations=ITERATIONS)
+    avg_total = sum(r["total"] for r in all_results) / len(all_results)
+    print(f"\nAverage total time over {ITERATIONS} iterations: {avg_total:.4f}s")
+
+    query_csv_path = write_query_timings_csv(all_results, Path(str(here()) / 'results' / f'{w_name}_{cg}_{cs}_{storage}_qt.csv'))
+    total_csv_path = write_total_timings_csv(all_results, Path(str(here()) / 'results' / f'{w_name}_{cg}_{cs}_{storage}_avg.csv'))
+    print(f"Wrote per-query average timings to {query_csv_path}")
+    print(f"Wrote average total workload timing to {total_csv_path}")
+    pass
+
+def test_strategy(conn, cs, cg, w_name, w, candidate_indexes):
+    cs_module = importlib.import_module(f"auto_index_selector.ConfigSelection.{cs}")
+    
+    if cs in ['cs_drop', 'cs_extend']:
+        for storage in [50, 100, 150, 200, 250, 300, 350, 400, 450, 500]:
+            config = cs_module.selectConfiguration(conn, w, candidate_indexes, storage)
+            create_path = generate_create_index_sql(config)
+            delete_path = generate_delete_index_sql(config)
+
+            execute_sql_file(conn, create_path)
+            print(f"Created indexes from {create_path}")
+
+            exp_size(conn, cg, cs, w, w_name, storage)
+            print("Experiment done")
+
+            execute_sql_file(conn, delete_path)
+            print(f"Dropped indexes using {delete_path}")
+    elif cs in ['cs_greedy']:
+        for k in [2, 3, 4, 5, 6, 7, 8, 9, 10]:
+            config = cs_module.selectConfiguration(conn, w, candidate_indexes, k=k, m=2)
+            create_path = generate_create_index_sql(config)
+            delete_path = generate_delete_index_sql(config)
+
+            execute_sql_file(conn, create_path)
+            print(f"Created indexes from {create_path}")
+
+            exp_k(conn, cg, cs, w, w_name, k, m=2)
+            print("Experiment done")
+
+            execute_sql_file(conn, delete_path)
+            print(f"Dropped indexes using {delete_path}")
+    else:
+        print(f"Error: {cs} doesn't exist.")

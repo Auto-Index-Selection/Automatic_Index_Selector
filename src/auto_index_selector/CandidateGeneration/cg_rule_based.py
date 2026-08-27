@@ -269,7 +269,7 @@ def setToDict(s:OrderedSet) -> Dict :
         result[table].append(columns)
     return result
 
-def generateCandidateIndexes(W: List, schema: Dict) -> Dict:
+def generateCandidateIndexes(conn, W: List, schema: Dict) -> Dict:
     '''
     Input : 
         W -> workload as a List

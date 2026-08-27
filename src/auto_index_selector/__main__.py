@@ -124,7 +124,7 @@ def main():
     print("Connection established successfully!")
 
     # candidate generation
-    candidateIndexes = cg_module.generateCandidateIndexes(W, schema)
+    candidateIndexes = cg_module.generateCandidateIndexes(conn, W, schema)
     # print(candidateIndexes)
     print(f"Candidate Indexex Generated......... {len(candidateIndexes)}")
 

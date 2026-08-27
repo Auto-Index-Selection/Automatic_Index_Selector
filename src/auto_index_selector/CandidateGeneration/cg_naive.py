@@ -8,7 +8,7 @@ from auto_index_selector.CandidateGeneration.dexter import runDexter
 
 def generateCandidateIndexesWorkload(
     conn,
-    workload: List[str]
+    workload: List[str], schema
 ):
     """
     Generate candidate indexes using Dexter.
