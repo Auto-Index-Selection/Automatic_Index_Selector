@@ -21,5 +21,5 @@ k = 2
 s = 400
  
 [workload]
-# Possible values: tpchWorkload, tpcdsWorkload, tpccWorkload
+# Possible values: tpchWorkload, tpcdsWorkload, tpccWorkload, jobWorkload
 module = "tpcdsWorkload"

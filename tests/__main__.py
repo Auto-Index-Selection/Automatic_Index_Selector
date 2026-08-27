@@ -12,6 +12,7 @@ W = [
         'tpchWorkload',
         'tpcdsWorkload',
         # 'tpccWorkload',
+        'jobWorkload',
     ]
 
 def test():
