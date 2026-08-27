@@ -35,7 +35,7 @@ module = "cg_rule_based"
 #                       size estimation and storage budget constraints.
 #   - "cs_extend"     : Extend Algorithm (Schlosser et al. ICDE 2019) with
 #                       recursive index morphing (k -> k + [col]) and memory budgeting.
-module = "config_sel"
+module = "cs_extend"
 
 # Parameters for Greedy(m, k), Whang Drop, and Extend:
 # m: Size of the exhaustively searched seed configuration (for config_sel) or
@@ -88,4 +88,4 @@ write_scale = 1.0
 #   - 10-30 : Pauses the pipeline for N seconds so external traffic (from your
 #             application, `pgbench`, or `python scripts/simulate_workload.py`)
 #             can run against the live database before `snap_after` is taken.
-window_duration_seconds = 15
+window_duration_seconds = 60

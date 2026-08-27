@@ -65,23 +65,57 @@ class PlaceholderResolver:
 
         resolved = query
 
-        # 1. Resolve date expressions e.g. col <= $1 or col >= $1 or col = $1 where col contains 'date'
+        # 1. CAST($N AS date) or CAST($N AS varchar) or CAST($N AS char)
+        resolved = re.sub(r"CAST\s*\(\s*\$(\d+)\s+AS\s+date\s*\)", "CAST('1998-01-01' AS date)", resolved, flags=re.IGNORECASE)
+        resolved = re.sub(r"CAST\s*\(\s*\$(\d+)\s+AS\s+varchar\w*\s*\)", "CAST('A' AS varchar)", resolved, flags=re.IGNORECASE)
+        resolved = re.sub(r"CAST\s*\(\s*\$(\d+)\s+AS\s+char\w*\s*\)", "CAST('A' AS char)", resolved, flags=re.IGNORECASE)
+
+        # 2. date $N, INTERVAL $N, INTERVAL '$N'
+        resolved = re.sub(r"\bdate\s+\$(\d+)", "date '1998-01-01'", resolved, flags=re.IGNORECASE)
+        resolved = re.sub(r"\bINTERVAL\s+\$(\d+)", "INTERVAL '1 day'", resolved, flags=re.IGNORECASE)
+        resolved = re.sub(r"\bINTERVAL\s+'\$(\d+)'", "INTERVAL '1 day'", resolved, flags=re.IGNORECASE)
+
+        # 3. LIKE / NOT LIKE / ILIKE / NOT ILIKE is ALWAYS followed by a string pattern
         resolved = re.sub(
-            r'(\w*(?:date|time)\w*)\s*([=><!]+|BETWEEN)\s*\$(\d+)',
-            r"\1 \2 '1998-01-01'",
+            r'(\bNOT\s+LIKE|\bLIKE|\bNOT\s+ILIKE|\bILIKE)\s*\$(\d+)',
+            r"\1 'A%'",
             resolved,
             flags=re.IGNORECASE
         )
 
-        # 2. Resolve string/varchar expressions e.g. col IN ($1, $2) or col = $1
+        # 4. Resolve string/varchar expressions e.g. col = $1 or col <> $1
         resolved = re.sub(
-            r'(\w*(?:name|mode|flag|status|comment|segment|priority|type|instruct|address|phone|brand|container|clerk)\w*)\s*([=><!]+|LIKE|ILIKE)\s*\$(\d+)',
+            r'(\w*(?:name|mode|flag|status|comment|segment|priority|type|instruct|address|phone|brand|container|clerk)\w*)\s*([=><!]+)\s*\$(\d+)',
             r"\1 \2 'A'",
             resolved,
             flags=re.IGNORECASE
         )
 
-        # 3. Resolve float/price/discount/tax/quantity/balance expressions
+        # 5. Resolve date expressions e.g. col <= $1 or col >= $1 or col = $1
+        resolved = re.sub(
+            r'(\w*(?:date|time)\w*)\s*([=><!]+|BETWEEN|\bIS\b)\s*\$(\d+)',
+            r"\1 \2 '1998-01-01'",
+            resolved,
+            flags=re.IGNORECASE
+        )
+
+        # 6. Handle multi-item IN ($1, $2, ...) and NOT IN ($1, $2, ...)
+        def _repl_in(m):
+            col, op, inside = m.group(1), m.group(2), m.group(3)
+            is_str = bool(re.search(r'(name|mode|flag|status|comment|segment|priority|type|instruct|address|phone|brand|container|clerk)', col, re.I))
+            is_date = bool(re.search(r'(date|time)', col, re.I))
+            val = "'A'" if is_str else ("'1998-01-01'" if is_date else "1")
+            new_inside = re.sub(r'\$\d+', val, inside)
+            return f"{col} {op} ({new_inside})"
+
+        resolved = re.sub(
+            r'(\w+)\s*(\bIN\b|\bNOT\s+IN\b)\s*\(([^)]+)\)',
+            _repl_in,
+            resolved,
+            flags=re.IGNORECASE
+        )
+
+        # 7. Resolve float/price/discount/tax/quantity/balance expressions
         resolved = re.sub(
             r'(\w*(?:price|discount|tax|qty|quantity|balance|acctbal|cost)\w*)\s*([=><!]+)\s*\$(\d+)',
             r"\1 \2 1.0",
@@ -89,7 +123,7 @@ class PlaceholderResolver:
             flags=re.IGNORECASE
         )
 
-        # 4. Resolve integer/key/id expressions
+        # 8. Resolve integer/key/id expressions
         resolved = re.sub(
             r'(\w*(?:key|id|num|number|size|count|days)\w*)\s*([=><!]+)\s*\$(\d+)',
             r"\1 \2 1",
@@ -97,7 +131,7 @@ class PlaceholderResolver:
             flags=re.IGNORECASE
         )
 
-        # 5. Resolve LIMIT / OFFSET $N
+        # 9. Resolve LIMIT / OFFSET $N
         resolved = re.sub(
             r'(LIMIT|OFFSET)\s*\$(\d+)',
             r"\1 10",
@@ -105,7 +139,7 @@ class PlaceholderResolver:
             flags=re.IGNORECASE
         )
 
-        # 6. Fallback: replace any remaining $N with integer 1
+        # 10. Fallback: replace any remaining $N with integer 1
         resolved = re.sub(r'\$\d+', '1', resolved)
 
         return resolved
@@ -148,7 +182,11 @@ def take_snapshot(conn) -> PgStatSnapshot:
                   AND query NOT ILIKE '%hypopg%'
                   AND query NOT ILIKE '%advisor%'
                   AND query NOT ILIKE '%information_schema%'
-                  AND query ILIKE 'SELECT%';
+                  AND query NOT ILIKE '%pg_settings%'
+                  AND query NOT ILIKE '%pg_catalog%'
+                  AND query NOT ILIKE '%current_setting%'
+                  AND query ILIKE 'SELECT%'
+                  AND query NOT ILIKE 'SELECT 1%';
             """)
             for qid, qtext, calls, total_time, rows in cur.fetchall():
                 snapshot.entries[int(qid)] = PgStatEntry(
@@ -159,7 +197,11 @@ def take_snapshot(conn) -> PgStatSnapshot:
                     rows=int(rows)
                 )
     except Exception as e:
-        logger.debug("Could not take pg_stat_statements snapshot: %s", e)
+        logger.warning(
+            "[pg_stat_statements] Could not query pg_stat_statements: %s\n"
+            "  -> Ensure 'pg_stat_statements' is in shared_preload_libraries in postgresql.conf and PostgreSQL was restarted.",
+            e
+        )
         conn.rollback()
 
     return snapshot
