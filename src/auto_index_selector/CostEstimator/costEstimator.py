@@ -400,13 +400,19 @@ def createCompositeHypoIndexes(conn, configuration):
             cur.execute("SELECT * FROM hypopg_create_index(%s);", (stmt,))
 
 
-def estimateWorkloadCostForConfig(conn, W, configuration):
+def estimateWorkloadCostForConfig(conn, W, configuration, query_weights=None):
+    """
+    Computes total hypothetical workload execution cost for a configuration.
+    If query_weights is provided ({query: call_frequency}), multiplies each query's
+    HypoPG cost by its observed frequency count.
+    """
     clearHypotheticalIndexes(conn)
     if configuration:
         createCompositeHypoIndexes(conn, configuration)
     total = 0.0
     for query in W:
-        total += getQueryCost(conn, query)
+        weight = float(query_weights.get(query, 1.0)) if query_weights else 1.0
+        total += weight * getQueryCost(conn, query)
     clearHypotheticalIndexes(conn)
     return total
 

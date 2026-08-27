@@ -6,7 +6,7 @@ DEXTER = True
 
 from itertools import combinations
 import subprocess
-import regex as re
+import re
 
 def generateCandidateIndexes(conn, max_width=2):
     """

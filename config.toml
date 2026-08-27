@@ -1,40 +1,91 @@
-# config.toml
-# Selects which implementation module to use for each pluggable stage
-# of the auto_index_selector pipeline. `main.py` reads this file and
-# dynamically imports the chosen module for each stage.
+# ==============================================================================
+# AUTOMATIC INDEX SELECTOR CONFIGURATION (config.toml)
+# ==============================================================================
+# Selects which implementation module to use for each pluggable stage of the
+# auto_index_selector pipeline. `__main__.py` dynamically imports the chosen
+# modules at runtime.
+# ==============================================================================
 
+# ------------------------------------------------------------------------------
+# 1. CANDIDATE GENERATION STAGE
+# ------------------------------------------------------------------------------
 [candidate_generation]
-# One of: cg_auto_admin, cg_dta, cg_naive, cg_rule_based, dexter
+# Available modules:
+#   - "cg_rule_based" : Extracts indexable columns and composite combinations
+#                       directly from SQL query WHERE, JOIN, and ORDER BY ASTs.
+#                       (Recommended default)
+#   - "cg_auto_admin" : Microsoft AutoAdmin candidate selection algorithm using
+#                       single-column indexable predicates and Greedy configuration search.
+#   - "cg_dta"        : Database Tuning Advisor heuristic candidate generator.
+#   - "cg_naive"      : Naive candidate generator utilizing Dexter integration.
+#   - "dexter"        : Exhaustive multi-column combination candidate generator
+#                       across all user tables (up to max_width).
 module = "cg_rule_based"
 
+
+# ------------------------------------------------------------------------------
+# 2. CONFIGURATION SELECTION STAGE
+# ------------------------------------------------------------------------------
 [config_selection]
-# One of: config_sel  (add more as new strategies are implemented)
+# Available modules:
+#   - "config_sel"    : Greedy(m, k) enumeration algorithm (Chaudhuri & Narasayya)
+#                       Minimizes Workload Cost = ReadCost + WritePenalties.
+#                       (Recommended default)
+#   - "cs_drop"       : Whang (1985) Drop Heuristic algorithm with HypoPG index
+#                       size estimation and storage budget constraints.
+#   - "cs_extend"     : Extend Algorithm (Schlosser et al. ICDE 2019) with
+#                       recursive index morphing (k -> k + [col]) and memory budgeting.
 module = "config_sel"
 
+# Parameters for Greedy(m, k), Whang Drop, and Extend:
+# m: Size of the exhaustively searched seed configuration (for config_sel) or
+#    max group size dropped at once (for cs_drop) (default: 2).
+m = 2
+
+# k: Maximum number of candidate indexes to recommend (for config_sel) (default: 10).
+k = 10
+
+# storage_budget: Maximum total index footprint in bytes (for cs_drop and cs_extend) (default: "inf").
+#                 e.g. 52428800 for 50 MB, or "inf" for unconstrained.
+storage_budget = "inf"
+
+
+# ------------------------------------------------------------------------------
+# 3. WORKLOAD INGESTION STAGE
+# ------------------------------------------------------------------------------
 [workload]
-# One of: tpchWorkload (loads .sql files from disk), pgStatStatementsWorkload (loads live queries from pg_stat_statements)
-module = "tpchWorkload"
+# Available modules:
+#   - "pgStatStatementsWorkload"  : Connects to PostgreSQL's `pg_stat_statements`
+#                                  view to automatically extract real-world read
+#                                  queries executed by live applications.
+#                                  Captures execution call counts (Δcalls) to weight
+#                                  query costs proportionally.
+#                                  Includes `PlaceholderResolver` ($1, $2 -> typed literals)
+#                                  so HypoPG can plan normalized queries without errors.
+module = "pgStatStatementsWorkload"
 
+
+# ------------------------------------------------------------------------------
+# 4. WRITE PENALTY ESTIMATOR STAGE
+# ------------------------------------------------------------------------------
 [write_penalty]
-# Set to true to enable the B-tree write penalty estimator.
-# Requires the advisor_write_stats extension to be loaded via
-# shared_preload_libraries in postgresql.conf.
-enabled = false
+# Master switch:
+#   true  : Enables the analytical B-tree write penalty model and tracks
+#           updates/inserts/deletes using the `advisor_write_stats` C extension.
+#   false : Bypasses write penalty calculation (read-only optimization).
+enabled = true
 
-# Operational mode: "simulate" (runs DML templates for demo/offline) or "live" (passive monitoring)
-mode = "simulate"
-
-# Analytical scaling factor for observed write counts (e.g., 100.0
-# to project a 100x OLTP write volume from the observed workload).
+# write_scale:
+#   Float multiplier applied to observed write counts.
+#   - 1.0   : Uses the exact number of writes observed during the window.
+#   - 10.0+ : Projects a higher write volume (e.g. 10x or 100x OLTP load) to
+#             penalize write-heavy indexes more aggressively.
 write_scale = 1.0
 
-# --- Live Mode Options (used when mode = "live") ---
-# Observation window in seconds to capture live background traffic (0 = no wait)
-window_duration_seconds = 0
-
-# --- Simulation Mode Options (used when mode = "simulate") ---
-dml_dir = "workload/sql/dml"
-simulation_mode = "random"     # "random" or "sequential"
-simulation_rounds = 50         # number of DML operations to execute
-simulation_seed = 42           # RNG seed for repeatable parameters
-simulation_timeout = 30        # Per-query timeout in seconds for simulation 
+# window_duration_seconds:
+#   Observation time in seconds to monitor PostgreSQL database traffic.
+#   - 0     : No sleep; captures database traffic between before-and-after snapshots.
+#   - 10-30 : Pauses the pipeline for N seconds so external traffic (from your
+#             application, `pgbench`, or `python scripts/simulate_workload.py`)
+#             can run against the live database before `snap_after` is taken.
+window_duration_seconds = 15

@@ -1,6 +1,6 @@
 from typing import *
 import sqlglot
-from auto_index_selector.costEstimator import *
+from ..CostEstimator.costEstimator import *
 from itertools import combinations
 
 def getTablesIn(query: str) -> List:
@@ -200,4 +200,12 @@ def bestConf(conn, W :List, schema: Dict) -> Dict:
         #     break
     candidateIndexes = listToDict(list(candidateIndexes))
     return candidateIndexes
+
+
+def generateCandidateIndexes(conn_or_W, W_or_schema, schema=None):
+    """Standard Candidate Generation interface wrapper."""
+    if schema is not None:
+        return bestConf(conn_or_W, W_or_schema, schema)
+    # If called as (W, schema)
+    return bestConf(None, conn_or_W, W_or_schema)
 

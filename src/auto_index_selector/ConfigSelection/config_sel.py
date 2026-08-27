@@ -17,13 +17,10 @@ def getTablesUsed(query):
 def sortedConfig(config):
     """
     Canonical form of a configuration.
-
-    A configuration is a SET of indexes, so (A, B) and (B, A) are the same
-    thing. Sorting puts them into one fixed order so they can be compared.
-    We return a tuple (not a list) because tuples can be put inside a set,
-    which is what makes the duplicate check fast.
+    Converts any inner lists to tuples so the configuration is fully hashable and sortable.
     """
-    return tuple(sorted(config))
+    canonical = tuple(tuple(x) if isinstance(x, list) else x for x in config)
+    return tuple(sorted(canonical))
 
 
 def getRelevantIndexes(tables, candidate_indexes):
@@ -209,12 +206,14 @@ def createCompositeHypoIndexes(conn, configuration):
     conn.commit()
 
 
-def estimateWorkloadCostForConfig(conn, W, configuration):
+def estimateWorkloadCostForConfig(conn, W, configuration, query_weights=None):
     """
     Total workload cost for ONE configuration (sum over all queries).
 
     configuration : iterable[(table, tuple(columns))]
     W             : list[str] SQL queries
+    query_weights : dict, optional
+                    per-query execution count weights: {query_str: call_count}
 
     Returns
     -------
@@ -227,32 +226,31 @@ def estimateWorkloadCostForConfig(conn, W, configuration):
 
     total = 0.0
     for query in W:
-        total += getQueryCost(conn, query)
+        weight = float(query_weights.get(query, 1.0)) if query_weights else 1.0
+        total += weight * getQueryCost(conn, query)
 
     clearHypotheticalIndexes(conn)
     return total
 
 
-def greedyMK(conn, W, candidate_dict, m, k, cost_cache=None, write_penalties=None):
+def greedyMK(conn, W, candidate_dict, m, k, cost_cache=None, write_penalties=None, query_weights=None):
     """
-    Greedy(m, k) enumeration algorithm (Chaudhuri & Narasayya, Section 5),
-    adapted to the table -> [[col,...], ...] candidate format with write penalty support.
+    Greedy(m, k) algorithm (Chaudhuri & Narasayya, 1997) with write penalty integration.
 
     Parameters
     ----------
     conn            : psycopg2 connection
-    W               : list[str] SQL queries (the workload)
-    candidate_dict  : dict(table -> list[list[str]])
-                      your existing candidate-index structure
-    m               : size of the exhaustively-searched seed configuration.
-                      m=2 is the paper's recommended default.
-    k               : final number of indexes to pick
-    cost_cache      : optional dict for memoizing frozenset(config) -> cost.
-                      Pass {} in if sweeping parameters repeatedly so you
-                      don't re-hit HypoPG+optimizer for configs you've
+    W               : list of query strings (the workload)
+    candidate_dict  : dict {table: [[col1], [col1, col2], ...]}
+    m               : size of exhaustively searched seed configuration
+    k               : maximum number of indexes to select
+    cost_cache      : dict, optional
+                      shared across runs to avoid re-evaluating configurations
                       already scored.
     write_penalties : dict, optional
                       pre-computed write penalties: {(table, (col1, ...)): penalty_float}
+    query_weights   : dict, optional
+                      per-query execution frequency counts: {query_str: call_count}
 
     Returns
     -------
@@ -274,7 +272,7 @@ def greedyMK(conn, W, candidate_dict, m, k, cost_cache=None, write_penalties=Non
     def cost(config):
         key = frozenset(config)
         if key not in cost_cache:
-            read_cost = estimateWorkloadCostForConfig(conn, W, key)
+            read_cost = estimateWorkloadCostForConfig(conn, W, key, query_weights=query_weights)
             write_cost = config_write_penalty(key)
             cost_cache[key] = read_cost + write_cost
         return cost_cache[key]
@@ -325,3 +323,12 @@ def greedyMK(conn, W, candidate_dict, m, k, cost_cache=None, write_penalties=Non
         remaining.remove(best_index)
 
     return S
+
+
+def selectConfiguration(conn, W, candidate_dict, m=2, k=10, cost_cache=None,
+                        write_penalties=None, query_weights=None, **kwargs):
+    """Standard interface for configuration selection."""
+    return greedyMK(conn, W, candidate_dict, m=m, k=k,
+                    cost_cache=cost_cache,
+                    write_penalties=write_penalties,
+                    query_weights=query_weights)

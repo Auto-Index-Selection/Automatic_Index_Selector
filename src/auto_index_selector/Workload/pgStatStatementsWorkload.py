@@ -1,12 +1,13 @@
 """
 Workload/pgStatStatementsWorkload.py
 ------------------------------------
-Live Workload Loader using PostgreSQL pg_stat_statements.
+Live Workload Loader & Snapshot Differencing using PostgreSQL pg_stat_statements.
 
-Extracts the top analytical SELECT queries executed on the live database,
-and uses an automated PlaceholderResolver to substitute normalized query
-placeholders ($1, $2, ...) with typed dummy literals so that HypoPG
-and EXPLAIN (FORMAT JSON) plan the queries without errors.
+Extracts analytical SELECT queries executed on the live database across an
+observation window (snap_before -> snap_after), and uses an automated
+PlaceholderResolver to substitute normalized query placeholders ($1, $2, ...)
+with typed dummy literals so that HypoPG and EXPLAIN (FORMAT JSON) plan the
+queries without errors.
 
 Usage in config.toml::
 
@@ -16,6 +17,8 @@ Usage in config.toml::
 
 import logging
 import re
+import time
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -31,6 +34,22 @@ _DEFAULT_TPCH_SCHEMA = {
     "orders": {"o_orderkey": "INT", "o_custkey": "INT", "o_orderstatus": "VARCHAR", "o_totalprice": "DOUBLE", "o_orderdate": "DATE", "o_orderpriority": "VARCHAR", "o_clerk": "VARCHAR", "o_shippriority": "INT", "o_comment": "VARCHAR"},
     "lineitem": {"l_orderkey": "INT", "l_partkey": "INT", "l_suppkey": "INT", "l_linenumber": "INT", "l_quantity": "DOUBLE", "l_extendedprice": "DOUBLE", "l_discount": "DOUBLE", "l_tax": "DOUBLE", "l_returnflag": "VARCHAR", "l_linestatus": "VARCHAR", "l_shipdate": "DATE", "l_commitdate": "DATE", "l_receiptdate": "DATE", "l_shipinstruct": "VARCHAR", "l_shipmode": "VARCHAR", "l_comment": "VARCHAR"},
 }
+
+
+@dataclass
+class PgStatEntry:
+    queryid: int
+    query: str
+    calls: int
+    total_exec_time: float
+    rows: int
+
+
+@dataclass
+class PgStatSnapshot:
+    """Snapshot of pg_stat_statements state at a point in time."""
+    timestamp: float = field(default_factory=time.time)
+    entries: Dict[int, PgStatEntry] = field(default_factory=dict)
 
 
 class PlaceholderResolver:
@@ -54,7 +73,7 @@ class PlaceholderResolver:
             flags=re.IGNORECASE
         )
 
-        # 2. Resolve string/varchar expressions e.g. col IN ($1, $2) or col = $1 where col contains name/char/flag/status/mode
+        # 2. Resolve string/varchar expressions e.g. col IN ($1, $2) or col = $1
         resolved = re.sub(
             r'(\w*(?:name|mode|flag|status|comment|segment|priority|type|instruct|address|phone|brand|container|clerk)\w*)\s*([=><!]+|LIKE|ILIKE)\s*\$(\d+)',
             r"\1 \2 'A'",
@@ -114,41 +133,92 @@ def fetch_live_schema(conn) -> Dict[str, Dict[str, str]]:
     return schema if schema else _DEFAULT_TPCH_SCHEMA
 
 
-def getWorkload(conn=None, limit: int = 50) -> Tuple[List[str], Dict[str, Dict[str, str]]]:
-    """Retrieve top SELECT queries from pg_stat_statements with resolved placeholders.
-
-    Returns:
-        (queries, schema) tuple matching the standard Workload interface.
-    """
+def take_snapshot(conn) -> PgStatSnapshot:
+    """Capture a point-in-time snapshot of pg_stat_statements entries."""
+    snapshot = PgStatSnapshot()
     if conn is None:
-        logger.warning("No live connection passed to pgStatStatementsWorkload. Returning default TPC-H schema.")
-        return [], _DEFAULT_TPCH_SCHEMA
-
-    schema = fetch_live_schema(conn)
-    resolver = PlaceholderResolver(schema=schema)
-    queries: List[str] = []
+        return snapshot
 
     try:
         with conn.cursor() as cur:
-            cur.execute(f"""
-                SELECT query
+            cur.execute("""
+                SELECT queryid, query, calls, total_exec_time, rows
                 FROM pg_stat_statements
                 WHERE query NOT ILIKE '%pg_stat%'
                   AND query NOT ILIKE '%hypopg%'
                   AND query NOT ILIKE '%advisor%'
                   AND query NOT ILIKE '%information_schema%'
-                  AND query ILIKE 'SELECT%'
-                ORDER BY total_exec_time DESC
-                LIMIT {int(limit)};
+                  AND query ILIKE 'SELECT%';
             """)
-            for row in cur.fetchall():
-                raw_query = row[0].strip()
-                if raw_query:
-                    resolved_query = resolver.resolve(raw_query)
-                    queries.append(resolved_query)
-        logger.info("Loaded %d live queries from pg_stat_statements", len(queries))
+            for qid, qtext, calls, total_time, rows in cur.fetchall():
+                snapshot.entries[int(qid)] = PgStatEntry(
+                    queryid=int(qid),
+                    query=qtext.strip(),
+                    calls=int(calls),
+                    total_exec_time=float(total_time),
+                    rows=int(rows)
+                )
     except Exception as e:
-        logger.error("Failed to load queries from pg_stat_statements: %s", e)
+        logger.debug("Could not take pg_stat_statements snapshot: %s", e)
         conn.rollback()
 
-    return queries, schema
+    return snapshot
+
+
+def get_delta_workload(
+    conn,
+    snap_before: PgStatSnapshot,
+    snap_after: PgStatSnapshot,
+    limit: int = 50
+) -> Tuple[List[str], Dict[str, Dict[str, str]]]:
+    """Compute query deltas across the observation window and return top active queries.
+
+    Queries are ordered by execution time delta (or call count delta) occurring strictly
+    during the observation window.
+    """
+    schema = fetch_live_schema(conn)
+    resolver = PlaceholderResolver(schema=schema)
+
+    # Calculate delta for each query
+    deltas: List[Tuple[float, int, str]] = []  # (delta_time, delta_calls, query)
+
+    for qid, after_entry in snap_after.entries.items():
+        before_entry = snap_before.entries.get(qid)
+        delta_calls = after_entry.calls - (before_entry.calls if before_entry else 0)
+        delta_time = after_entry.total_exec_time - (before_entry.total_exec_time if before_entry else 0.0)
+
+        if delta_calls > 0:
+            deltas.append((delta_time, delta_calls, after_entry.query))
+
+    # If queries were executed during window, rank them by delta_time DESC
+    # Extract queries and attach execution frequency weights (delta_calls)
+    queries: List[str] = []
+    query_weights: Dict[str, float] = {}
+
+    if deltas:
+        deltas.sort(key=lambda x: -x[0])
+        for _, calls, q in deltas[:limit]:
+            resolved = resolver.resolve(q)
+            queries.append(resolved)
+            query_weights[resolved] = float(max(1, calls))
+        logger.info("[pg_stat_statements] Extracted %d active queries from observation window delta", len(queries))
+    else:
+        # Fallback: if no new calls occurred during window, extract top cumulative queries from after-snapshot
+        all_entries = sorted(snap_after.entries.values(), key=lambda e: -e.total_exec_time)
+        for entry in all_entries[:limit]:
+            resolved = resolver.resolve(entry.query)
+            queries.append(resolved)
+            query_weights[resolved] = float(max(1, entry.calls))
+        logger.info("[pg_stat_statements] Window was quiet; loaded %d cumulative baseline queries", len(queries))
+
+    return queries, schema, query_weights
+
+
+def getWorkload(conn=None, limit: int = 50) -> Tuple[List[str], Dict[str, Dict[str, str]], Dict[str, float]]:
+    """Single-call fallback interface matching the standard Workload module signature."""
+    if conn is None:
+        logger.warning("No live connection passed to pgStatStatementsWorkload. Returning default TPC-H schema.")
+        return [], _DEFAULT_TPCH_SCHEMA, {}
+
+    snap = take_snapshot(conn)
+    return get_delta_workload(conn, PgStatSnapshot(), snap, limit=limit)

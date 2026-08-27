@@ -140,89 +140,102 @@ def main():
     )
     print("Connection established successfully!")
 
-    # --- Write penalty estimator setup (optional) ---
+    # --- 1. Snapshot Before Window (Writes & Reads) ---
     wp_config = cfg.get("write_penalty", {})
     wp_enabled = wp_config.get("enabled", False)
     wp_estimator = None
-    snap_before = None
+    snap_before_writes = None
+    snap_before_reads = None
 
     if wp_enabled:
-        import time
         from auto_index_selector.CostEstimator.write_penalty_estimator import WritePenaltyEstimator
-        mode = wp_config.get("mode", "simulate")
         write_scale = float(wp_config.get("write_scale", 1.0))
         wp_estimator = WritePenaltyEstimator(conn, write_scale=write_scale)
         wp_estimator.ensure_extension()
-        snap_before = wp_estimator.snapshot()
-        print(f"[WritePenalty] Mode='{mode}', before-snapshot captured (scale={write_scale})")
+        snap_before_writes = wp_estimator.snapshot()
+        print(f"[WritePenalty] Captured write before-snapshot (scale={write_scale})")
 
-        # In SIMULATE mode: run synthetic DML workload replay for demo/offline with timeout
-        if mode == "simulate":
-            from auto_index_selector.Workload.dml_runner import DMLWorkloadRunner
-            sim_timeout = int(wp_config.get("simulation_timeout", 30))
-            if sim_timeout > 0:
-                try:
-                    with conn.cursor() as cur:
-                        cur.execute(f"SET statement_timeout = {sim_timeout * 1000};")
-                    print(f"[Simulation] Set PostgreSQL statement_timeout = {sim_timeout}s")
-                except Exception as e:
-                    pass
+    if hasattr(wl_module, "take_snapshot"):
+        snap_before_reads = wl_module.take_snapshot(conn)
+        print(f"[Workload] Captured pg_stat_statements before-snapshot ({len(snap_before_reads.entries)} queries tracked)")
 
-            dml_runner = DMLWorkloadRunner(
-                conn=conn,
-                dml_dir=wp_config.get("dml_dir", "workload/sql/dml"),
-                mode=wp_config.get("simulation_mode", "random"),
-                rounds=int(wp_config.get("simulation_rounds", 50)),
-                seed=int(wp_config.get("simulation_seed", 42)),
-                statement_timeout_ms=sim_timeout * 1000 if sim_timeout > 0 else 0,
-            )
-            rounds = wp_config.get("simulation_rounds", 50)
-            print(f"[WritePenalty] Simulating {rounds} DML operations...")
-            dml_runner.run()
+    # --- 2. Observation Window (Wait for background application/simulator traffic) ---
+    duration = int(wp_config.get("window_duration_seconds", 0))
+    if duration > 0:
+        import time
+        print(f"[Observer] Monitoring database for {duration}s observation window...")
+        time.sleep(duration)
 
-            # Reset timeout back to default after simulation completes
-            if sim_timeout > 0:
-                try:
-                    with conn.cursor() as cur:
-                        cur.execute("SET statement_timeout = 0;")
-                except Exception:
-                    pass
+    # --- Capture both after-snapshots immediately when observation window ends ---
+    snap_after_reads = None
+    if hasattr(wl_module, "take_snapshot") and snap_before_reads is not None:
+        snap_after_reads = wl_module.take_snapshot(conn)
 
-        # In LIVE mode: optionally sleep for observation window
-        elif mode == "live":
-            duration = int(wp_config.get("window_duration_seconds", 0))
-            if duration > 0:
-                print(f"[WritePenalty] Monitoring live database for {duration}s...")
-                time.sleep(duration)
+    snap_after_writes = None
+    if wp_enabled and wp_estimator and snap_before_writes:
+        snap_after_writes = wp_estimator.snapshot()
 
-    # workload
-    import inspect
-    sig = inspect.signature(wl_module.getWorkload)
-    if 'conn' in sig.parameters:
-        W, schema = wl_module.getWorkload(conn=conn)
+    # --- 3. Extract Read Workload (Delta Queries & Execution Weights) ---
+    query_weights = {}
+    if hasattr(wl_module, "get_delta_workload") and snap_before_reads is not None and snap_after_reads is not None:
+        W, schema, query_weights = wl_module.get_delta_workload(conn, snap_before_reads, snap_after_reads)
     else:
-        W, schema = wl_module.getWorkload()
-    print("Loaded Workload...........")
+        W, schema, query_weights = wl_module.getWorkload(conn=conn)
+    print(f"Loaded Workload: {len(W)} active queries loaded (weighted by pg_stat_statements call counts).")
 
-    # candidate generation
+    # --- 4. Candidate Generation ---
     candidateIndexes = cg_module.generateCandidateIndexes(W, schema)
-    print(candidateIndexes)
-    print("Candidate Indexex Generated.........")
+    total_candidates = sum(len(v) for v in candidateIndexes.values()) if isinstance(candidateIndexes, dict) else len(candidateIndexes)
+    print(f"Candidate Indexes Generated: {total_candidates} candidates across tables.")
 
-    # --- Write penalty computation (if enabled) ---
+    # --- 5. Write Penalty Computation (Delta Writes) ---
     write_penalties = {}
-    if wp_enabled and wp_estimator and snap_before:
-        snap_after = wp_estimator.snapshot()
-        delta = wp_estimator.compute_delta(snap_before, snap_after)
+    if wp_enabled and wp_estimator and snap_before_writes and snap_after_writes:
+        delta = wp_estimator.compute_delta(snap_before_writes, snap_after_writes)
         write_penalties = wp_estimator.estimate_penalties(candidateIndexes, delta)
-        print(f"[WritePenalty] Computed penalties for {len(write_penalties)} candidate indexes")
-        for idx_key, penalty in sorted(write_penalties.items(), key=lambda x: -x[1]):
-            if penalty > 0:
-                print(f"  {idx_key[0]}.({','.join(idx_key[1])}): penalty = {penalty:.4f}")
+        active_penalties = {k: v for k, v in write_penalties.items() if v > 0}
+        print(f"[WritePenalty] Computed penalties for {len(write_penalties)} candidate indexes ({len(active_penalties)} penalized)")
+        for idx_key, penalty in sorted(active_penalties.items(), key=lambda x: -x[1]):
+            print(f"  {idx_key[0]}.({','.join(idx_key[1])}): penalty = {penalty:.4f}")
 
-    # config selection
-    selected = cs_module.greedyMK(conn, W, candidateIndexes, m=2, k=10, write_penalties=write_penalties)
-    print(selected)
+    # --- 6. Configuration Selection ---
+    cs_config = cfg.get("config_selection", {})
+    m_val = int(cs_config.get("m", 2))
+    k_val = int(cs_config.get("k", 10))
+    storage_budget = cs_config.get("storage_budget", float("inf"))
+    if isinstance(storage_budget, str) and storage_budget.lower() != "inf":
+        storage_budget = float(storage_budget)
+
+    if hasattr(cs_module, "selectConfiguration"):
+        selected = cs_module.selectConfiguration(
+            conn, W, candidateIndexes,
+            m=m_val, k=k_val,
+            storage_budget=storage_budget,
+            max_group=m_val,
+            write_penalties=write_penalties,
+            query_weights=query_weights
+        )
+    elif hasattr(cs_module, "greedyMK"):
+        selected = cs_module.greedyMK(
+            conn, W, candidateIndexes,
+            m=m_val, k=k_val,
+            write_penalties=write_penalties,
+            query_weights=query_weights
+        )
+    elif hasattr(cs_module, "dropHeuristic"):
+        selected = cs_module.dropHeuristic(
+            conn, W, candidateIndexes,
+            storage_budget=storage_budget,
+            max_group=m_val,
+            write_penalties=write_penalties,
+            query_weights=query_weights
+        )
+    else:
+        raise AttributeError(f"Module {cs_module.__name__} has no supported selection function")
+
+    print("\nSelected Index Configuration:")
+    for table, cols in selected:
+        print(f"  CREATE INDEX ON {table}({','.join(cols)});")
 
 
     # todo
