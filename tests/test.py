@@ -1,16 +1,17 @@
 
 import sys
-from .test_strategy import test_strategy
+from tests.test_strategy import test_strategy
 import importlib
 import psycopg2
 from dotenv import load_dotenv
 import os
-
-CG = ['cg_auto_admin', 'cg_dta', 'cg_rule_based', 'cg_extend']
+from pyprojroot import here
+print("Current working directory:", here())
+CG = ['cg_dta', 'cg_rule_based', 'cg_extend']
 CS = ['cs_extend', 'cs_greedy', 'cs_drop']
 W = [
-        'tpchWorkload',
-        'tpcdsWorkload',
+        # 'tpchWorkload',
+        # 'tpcdsWorkload',
         # 'tpccWorkload',
         'jobWorkload',
     ]
@@ -20,7 +21,7 @@ def test():
             wl_module = importlib.import_module(f"auto_index_selector.Workload.{w_name}")
             w, DB_NAME, schema = wl_module.getWorkload()
             load_dotenv()
-            
+            print(f"Workload loaded: {w_name}")
             conn = psycopg2.connect(
                 dbname=DB_NAME,
                 user=os.getenv("DB_USER"),
@@ -28,13 +29,15 @@ def test():
                 host=os.getenv("DB_HOST"),
                 port=os.getenv("DB_PORT")
             )
+            print(f"Connected to database: {DB_NAME}")
             for cg in CG:
-                cg_module = importlib.import_module(f"auto_index_selector.CadidateGeneration.{cg}")
+                cg_module = importlib.import_module(f"auto_index_selector.CandidateGeneration.{cg}")
                 candidate_indexes = cg_module.generateCandidateIndexes(conn, w, schema)
                 for cs in CS:
                     if( (cs=='cs_extend' and cg!='cg_extend') or (cs!='cs_extend' and cg=='cg_extend') ):
                         continue
-                    test_strategy(cg, cs, w_name, w, candidate_indexes)
+                    print(f"Running test_strategy with cg={cg}, cs={cs}, w_name={w_name}")
+                    test_strategy(conn, cg, cs, w_name, w, candidate_indexes)
 
 def plot():
     pass
@@ -44,4 +47,4 @@ def main():
     plot()    
 
 if __name__ == '__main__':
-    sys.exit(main)
+    sys.exit(main())

@@ -118,53 +118,14 @@ def _sort_query_labels(labels) -> list:
  
     return sorted(labels, key=key)
 
-def main():
-    # workload
-    W, DB_NAME, schema = wl_module.getWorkload()
-    # print(W)
-    # print(schema)
-    print("Loaded Workload...........")
-
-    # connection setup
-    load_dotenv()
-
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        host=os.getenv("DB_HOST"),
-        port=os.getenv("DB_PORT")
-    )
-    print("Connection established successfully!")
-
-    # 1. create indexes using create_index.sql
-    create_path = Path(str(here() / 'indexes' / 'create_index.sql'))
-    execute_sql_file(conn, create_path)
-    print(f"Created indexes from {create_path}")
-
-    # 2-4. run every query in the workload, x (ITERATIONS) times,
-    #      measuring per-query and per-iteration total timings
-    all_results = measure_workload(conn, W, iterations=ITERATIONS)
-    avg_total = sum(r["total"] for r in all_results) / len(all_results)
-    print(f"\nAverage total time over {ITERATIONS} iterations: {avg_total:.4f}s")
-
-    query_csv_path = write_query_timings_csv(all_results)
-    total_csv_path = write_total_timings_csv(all_results)
-    print(f"Wrote per-query average timings to {query_csv_path}")
-    print(f"Wrote average total workload timing to {total_csv_path}")
-
-    # 5. drop indexes using delete_index.sql
-    delete_path = Path(str(here() / 'indexes' / 'delete_index.sql'))
-    execute_sql_file(conn, delete_path)
-    print(f"Dropped indexes using {delete_path}")
 
 def exp_k(conn, cg, cs, w, w_name, k, m):
     all_results = measure_workload(conn, w, iterations=ITERATIONS)
     avg_total = sum(r["total"] for r in all_results) / len(all_results)
     print(f"\nAverage total time over {ITERATIONS} iterations: {avg_total:.4f}s")
 
-    query_csv_path = write_query_timings_csv(all_results, Path(str(here()) / 'results' / f'{w_name}_{cg}_{cs}_{k}_{m}_qt.csv'))
-    total_csv_path = write_total_timings_csv(all_results, Path(str(here()) / 'results' / f'{w_name}_{cg}_{cs}_{k}_{m}_avg.csv'))
+    query_csv_path = write_query_timings_csv(all_results, Path(str(here() / 'results' / f'{w_name}_{cg}_{cs}_{k}_{m}_qt.csv')))
+    total_csv_path = write_total_timings_csv(all_results, Path(str(here() / 'results' / f'{w_name}_{cg}_{cs}_{k}_{m}_avg.csv')))
     print(f"Wrote per-query average timings to {query_csv_path}")
     print(f"Wrote average total workload timing to {total_csv_path}")
     pass
@@ -174,20 +135,20 @@ def exp_size(conn, cg, cs, w, w_name, storage):
     avg_total = sum(r["total"] for r in all_results) / len(all_results)
     print(f"\nAverage total time over {ITERATIONS} iterations: {avg_total:.4f}s")
 
-    query_csv_path = write_query_timings_csv(all_results, Path(str(here()) / 'results' / f'{w_name}_{cg}_{cs}_{storage}_qt.csv'))
-    total_csv_path = write_total_timings_csv(all_results, Path(str(here()) / 'results' / f'{w_name}_{cg}_{cs}_{storage}_avg.csv'))
+    query_csv_path = write_query_timings_csv(all_results, Path(str(here() / 'results' / f'{w_name}_{cg}_{cs}_{storage}_qt.csv')))
+    total_csv_path = write_total_timings_csv(all_results, Path(str(here() / 'results' / f'{w_name}_{cg}_{cs}_{storage}_avg.csv')))
     print(f"Wrote per-query average timings to {query_csv_path}")
     print(f"Wrote average total workload timing to {total_csv_path}")
     pass
 
-def test_strategy(conn, cs, cg, w_name, w, candidate_indexes):
+def test_strategy(conn, cg, cs, w_name, w, candidate_indexes):
     cs_module = importlib.import_module(f"auto_index_selector.ConfigSelection.{cs}")
     
     if cs in ['cs_drop', 'cs_extend']:
         for storage in [50, 100, 150, 200, 250, 300, 350, 400, 450, 500]:
             config = cs_module.selectConfiguration(conn, w, candidate_indexes, storage)
-            create_path = generate_create_index_sql(config)
-            delete_path = generate_delete_index_sql(config)
+            create_path = generate_create_index_sql(config, Path(str(here() / 'indexes' / f'{w_name}_{cg}_{cs}_{storage}_create.sql')))
+            delete_path = generate_delete_index_sql(config, Path(str(here() / 'indexes' / f'{w_name}_{cg}_{cs}_{storage}_delete.sql')))
 
             execute_sql_file(conn, create_path)
             print(f"Created indexes from {create_path}")
@@ -200,8 +161,8 @@ def test_strategy(conn, cs, cg, w_name, w, candidate_indexes):
     elif cs in ['cs_greedy']:
         for k in [2, 3, 4, 5, 6, 7, 8, 9, 10]:
             config = cs_module.selectConfiguration(conn, w, candidate_indexes, k=k, m=2)
-            create_path = generate_create_index_sql(config)
-            delete_path = generate_delete_index_sql(config)
+            create_path = generate_create_index_sql(config, Path(str(here() / 'indexes' / f'{w_name}_{cg}_{cs}_{k}_{2}_create.sql')))
+            delete_path = generate_delete_index_sql(config, Path(str(here() / 'indexes' / f'{w_name}_{cg}_{cs}_{k}_{2}_delete.sql')))
 
             execute_sql_file(conn, create_path)
             print(f"Created indexes from {create_path}")
@@ -213,3 +174,4 @@ def test_strategy(conn, cs, cg, w_name, w, candidate_indexes):
             print(f"Dropped indexes using {delete_path}")
     else:
         print(f"Error: {cs} doesn't exist.")
+
