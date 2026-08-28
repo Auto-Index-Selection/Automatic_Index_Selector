@@ -1,0 +1,9 @@
+{
+  "workload": "TPC-C Standard (9 Tables)",
+  "timestamp": "20260828_092203",
+  "duration_seconds": 0.7009727954864502,
+  "iterations": 1,
+  "results": {
+    "baseline": 0.004835161962546408
+  }
+}

@@ -277,16 +277,16 @@ def greedyMK(conn, W, candidate_dict, m, k, cost_cache=None, write_penalties=Non
             cost_cache[key] = read_cost + write_cost
         return cost_cache[key]
 
-    m = min(m, k, len(candidate_indexes))
+    m_eff = min(m, k, len(candidate_indexes))
+    # Prevent combinatorial explosion if candidate pool is very large (e.g. cg_naive with >50 candidates)
+    if len(candidate_indexes) > 50 and m_eff > 1:
+        m_eff = 1
 
-    # --- Step 1: exhaustively find the best seed of size <= m ---
-    # Exhaustive over small subsets so it stays cheap, but it's what lets
-    # Greedy(m,k) capture index *interactions* a pure greedy walk (m=0)
-    # would miss -- e.g. two columns that are only valuable together.
+    # --- Step 1: find the best seed of size <= m_eff ---
     best_seed = frozenset()
     best_seed_cost = cost(best_seed)  # cost with no indexes at all
 
-    for size in range(1, m + 1):
+    for size in range(1, m_eff + 1):
         for combo in combinations(candidate_indexes, size):
             c = frozenset(combo)
             c_cost = cost(c)

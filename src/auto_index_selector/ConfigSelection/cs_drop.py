@@ -136,7 +136,8 @@ def dropHeuristic(conn, W, candidate_dict, storage_budget=float('inf'),
         best_config = None
         best_ratio = float("inf")
 
-        for group_size in range(1, max_group + 1):
+        eff_max_group = 1 if len(S) > 30 else max_group
+        for group_size in range(1, eff_max_group + 1):
             for group in combinations(sorted(S), group_size):
                 trial = S - frozenset(group)
                 bytes_freed = current_size - size(trial)
@@ -158,6 +159,8 @@ def dropHeuristic(conn, W, candidate_dict, storage_budget=float('inf'),
 
     # --- Step 3: Keep dropping while it strictly reduces total cost ---
     for group_size in range(1, max_group + 1):
+        if len(S) > 30 and group_size > 1:
+            break
         while True:
             if len(S) < group_size:
                 break

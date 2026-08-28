@@ -173,16 +173,10 @@ def applyRule3(q, schema):
 
     # print(temp) 
     for table, idxs in temp.items():
-        columns = f'{table}.['
         for idx in idxs:
-            for col in idx.split(','):
-                # print(col)
-                columns += col + ','
-            columns = columns[:-1] + ']'
-            # print(columns)
-            result.add(columns)
-    # print("")
-    # print(result)
+            col_parts = [c.strip() for c in idx.split(',') if c.strip()]
+            if col_parts:
+                result.add(f"{table}.[{','.join(col_parts)}]")
     return result
 
 # def applyRule4(J, EQ, RANGE):
