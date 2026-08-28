@@ -211,12 +211,12 @@ def get_delta_workload(
     conn,
     snap_before: PgStatSnapshot,
     snap_after: PgStatSnapshot,
-    limit: int = 50
-) -> Tuple[List[str], Dict[str, Dict[str, str]]]:
-    """Compute query deltas across the observation window and return top active queries.
+    limit: Optional[int] = None,
+) -> Tuple[List[str], Dict[str, Dict[str, str]], Dict[str, float]]:
+    """Compute query deltas across the observation window and return active queries.
 
     Queries are ordered by execution time delta (or call count delta) occurring strictly
-    during the observation window.
+    during the observation window. Returns ALL queries with non-zero execution deltas.
     """
     schema = fetch_live_schema(conn)
     resolver = PlaceholderResolver(schema=schema)
@@ -239,15 +239,17 @@ def get_delta_workload(
 
     if deltas:
         deltas.sort(key=lambda x: -x[0])
-        for _, calls, q in deltas[:limit]:
+        selected_deltas = deltas[:limit] if limit is not None else deltas
+        for _, calls, q in selected_deltas:
             resolved = resolver.resolve(q)
             queries.append(resolved)
             query_weights[resolved] = float(max(1, calls))
         logger.info("[pg_stat_statements] Extracted %d active queries from observation window delta", len(queries))
     else:
-        # Fallback: if no new calls occurred during window, extract top cumulative queries from after-snapshot
+        # Fallback: if no new calls occurred during window, extract cumulative queries from after-snapshot
         all_entries = sorted(snap_after.entries.values(), key=lambda e: -e.total_exec_time)
-        for entry in all_entries[:limit]:
+        selected_entries = all_entries[:limit] if limit is not None else all_entries
+        for entry in selected_entries:
             resolved = resolver.resolve(entry.query)
             queries.append(resolved)
             query_weights[resolved] = float(max(1, entry.calls))
@@ -256,7 +258,7 @@ def get_delta_workload(
     return queries, schema, query_weights
 
 
-def getWorkload(conn=None, limit: int = 50) -> Tuple[List[str], Dict[str, Dict[str, str]], Dict[str, float]]:
+def getWorkload(conn=None, limit: Optional[int] = None) -> Tuple[List[str], Dict[str, Dict[str, str]], Dict[str, float]]:
     """Single-call fallback interface matching the standard Workload module signature."""
     if conn is None:
         logger.warning("No live connection passed to pgStatStatementsWorkload. Returning default TPC-H schema.")
