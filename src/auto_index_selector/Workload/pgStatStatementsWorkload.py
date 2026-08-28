@@ -220,33 +220,24 @@ def get_delta_workload(
     schema = fetch_live_schema(conn)
     resolver = PlaceholderResolver(schema=schema)
 
-    # Calculate delta for each query
-    deltas: List[Tuple[float, int, str]] = []  # (delta_time, delta_calls, query)
-
-    for qid, after_entry in snap_after.entries.items():
-        before_entry = snap_before.entries.get(qid)
-        delta_calls = after_entry.calls - (before_entry.calls if before_entry else 0)
-        delta_time = after_entry.total_exec_time - (before_entry.total_exec_time if before_entry else 0.0)
-
-        if delta_calls > 0:
-            deltas.append((delta_time, delta_calls, after_entry.query))
-
-    # If queries were executed during window, rank them by delta_time DESC
-    # Extract queries and attach execution frequency weights (delta_calls)
     queries: List[str] = []
     query_weights: Dict[str, float] = {}
 
-    if deltas:
-        deltas.sort(key=lambda x: -x[0])
-        for _, calls, q in deltas:
-            resolved = resolver.resolve(q)
+    # Extract all queries executed with positive call deltas during the window
+    for qid, after_entry in snap_after.entries.items():
+        before_entry = snap_before.entries.get(qid)
+        delta_calls = after_entry.calls - (before_entry.calls if before_entry else 0)
+
+        if delta_calls > 0:
+            resolved = resolver.resolve(after_entry.query)
             queries.append(resolved)
-            query_weights[resolved] = float(max(1, calls))
+            query_weights[resolved] = float(delta_calls)
+
+    if queries:
         logger.info("[pg_stat_statements] Extracted %d active queries from observation window delta", len(queries))
     else:
         # Fallback: if no new calls occurred during window, extract cumulative queries from after-snapshot
-        all_entries = sorted(snap_after.entries.values(), key=lambda e: -e.total_exec_time)
-        for entry in all_entries:
+        for entry in snap_after.entries.values():
             resolved = resolver.resolve(entry.query)
             queries.append(resolved)
             query_weights[resolved] = float(max(1, entry.calls))
