@@ -1,0 +1,27 @@
+{
+  "workload": "TPC-C",
+  "timestamp": "20260828_082635",
+  "duration_seconds": 155.7836000919342,
+  "iterations": 2,
+  "timeout_ms": null,
+  "results": {
+    "baseline": 0.8557028060604353,
+    "cg_rule_based_config_sel_k2": 0.4244775419938378,
+    "cg_rule_based_config_sel_k3": 0.4265612465387676,
+    "cg_rule_based_config_sel_k5": 0.43049465646618046,
+    "cg_rule_based_config_sel_k7": 0.4312957540678326,
+    "cg_rule_based_config_sel_k10": 0.42644603841472417,
+    "cg_rule_based_cs_drop_mb100": 0.8528561005659867,
+    "cg_rule_based_cs_drop_mb250": 0.5741033100348432,
+    "cg_rule_based_cs_drop_mb500": 0.5816877399920486,
+    "cg_rule_based_cs_drop_mb1000": 0.4298835279478226,
+    "cg_rule_based_cs_drop_mbinf": 0.4265732784406282,
+    "cg_rule_based_cs_extend_mb100": 0.8518487944384106,
+    "cg_rule_based_cs_extend_mb250": 0.578733029513387,
+    "cg_rule_based_cs_extend_mb500": 0.571580664603971,
+    "cg_rule_based_cs_extend_mb1000": 0.5764896280597895,
+    "cg_rule_based_cs_extend_mbinf": 0.5781079410226084,
+    "cg_dta_config_sel_k10": 0.8532487245101947,
+    "cg_naive_config_sel_k10": 0.8537194249802269
+  }
+}

@@ -1,0 +1,25 @@
+Workload: TPC-C
+Timestamp: 20260828_082635
+Duration: 2.60 minutes
+Iterations: 2
+Timeout: Nonems
+
+Rankings (avg seconds):
+cg_rule_based_config_sel_k2: 0.424478
+cg_rule_based_config_sel_k10: 0.426446
+cg_rule_based_config_sel_k3: 0.426561
+cg_rule_based_cs_drop_mbinf: 0.426573
+cg_rule_based_cs_drop_mb1000: 0.429884
+cg_rule_based_config_sel_k5: 0.430495
+cg_rule_based_config_sel_k7: 0.431296
+cg_rule_based_cs_extend_mb500: 0.571581
+cg_rule_based_cs_drop_mb250: 0.574103
+cg_rule_based_cs_extend_mb1000: 0.576490
+cg_rule_based_cs_extend_mbinf: 0.578108
+cg_rule_based_cs_extend_mb250: 0.578733
+cg_rule_based_cs_drop_mb500: 0.581688
+cg_rule_based_cs_extend_mb100: 0.851849
+cg_rule_based_cs_drop_mb100: 0.852856
+cg_dta_config_sel_k10: 0.853249
+cg_naive_config_sel_k10: 0.853719
+baseline: 0.855703

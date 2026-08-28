@@ -1,0 +1,2 @@
+strategy,avg_total_time_seconds,timed_out_queries
+baseline,11.136007,"Q17,Q2,Q20,Q21"

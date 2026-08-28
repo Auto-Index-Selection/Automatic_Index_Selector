@@ -10,23 +10,32 @@ def getTablesIn(query: str) -> List:
     return tables
 
 def singleIndexableColumnsIn(query: str, schema: Dict) -> List:
-    indexable_columns = set() # to be returned
-    parsedQuery = sqlglot.parse_one(query, read='postgres')  # parses the query
+    indexable_columns = set()
+    parsedQuery = sqlglot.parse_one(query, read='postgres')
 
-    # get all columns in query
-    cols_in_query = []
-    for col in parsedQuery.find_all(sqlglot.exp.Column):
-        cols_in_query.append(col.name)
-    
-
-    for table in parsedQuery.find_all(sqlglot.exp.Table):
-        if table.name not in schema.keys():
+    alias_map = {}
+    for table_exp in parsedQuery.find_all(sqlglot.exp.Table):
+        t_name = table_exp.name
+        if not t_name:
             continue
-        # print(f'{type(table.name)}')
-        for col in schema[table.name]:
-            if col in cols_in_query:
-                indexable_columns.add(f'{table.name}.{col}')
-    print('done indexable columns')
+        alias = table_exp.alias
+        if alias:
+            alias_map[alias] = t_name
+        alias_map[t_name] = t_name
+
+    for col in parsedQuery.find_all(sqlglot.exp.Column):
+        col_name = col.name
+        tbl_ref = col.table
+        if tbl_ref and tbl_ref in alias_map:
+            real_tbl = alias_map[tbl_ref]
+            if real_tbl in schema and col_name in schema[real_tbl]:
+                indexable_columns.add(f'{real_tbl}.{col_name}')
+        else:
+            for real_tbl in alias_map.values():
+                if real_tbl in schema and col_name in schema[real_tbl]:
+                    indexable_columns.add(f'{real_tbl}.{col_name}')
+                    break
+
     return list(indexable_columns)
 
 def enumerateConfigsHelperExhaustive(conn, I: List, total_columns: int, W: list) -> List: 
@@ -175,29 +184,24 @@ def listToDict(candidateIndexes: List) -> Dict:
     return result
     pass
 
-def bestConf(conn, W :List, schema: Dict) -> Dict:
+def bestConf(conn, W: List, schema: Dict) -> Dict:
     '''
     Input : 
         W -> workload as a List
     Return :
         candidateIndexes -> Candidate Indexes as dict {table: candidates}
     '''
-    candidateIndexes = ['partsupp.ps_suppkey', 'supplier.s_nationkey', 'orders.o_custkey', 'lineitem.l_shipdate', 'supplier.s_suppkey', 'part.p_size', 'part.p_container', 'part.p_brand', 'lineitem.l_partkey', 'lineitem.l_orderkey', 'nation.n_nationkey', 'partsupp.ps_partkey', 'part.p_partkey', 'lineitem.l_suppkey', 'orders.o_orderkey', 'customer.c_acctbal', 'part.p_type']
-    candidateIndexes = listToDict(candidateIndexes)
-    return candidateIndexes
     candidateIndexes = set()
-    I = set()
-    # i=0
     for query in W:
         I = singleIndexableColumnsIn(query, schema)
-        # print(I)
-        bestIndexes = enumerateConfigs(conn, I, [query])
-        print(bestIndexes)
-        print()
-        candidateIndexes = candidateIndexes.union(bestIndexes)
-        # i+=1
-        # if i==5:
-        #     break
+        if not I:
+            continue
+        if conn is not None:
+            bestIndexes = enumerateConfigs(conn, I, [query])
+            candidateIndexes = candidateIndexes.union(bestIndexes)
+        else:
+            candidateIndexes = candidateIndexes.union(I)
+
     candidateIndexes = listToDict(list(candidateIndexes))
     return candidateIndexes
 

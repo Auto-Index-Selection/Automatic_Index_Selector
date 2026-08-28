@@ -2,79 +2,113 @@ from typing import *
 import sqlglot as sg
 from ordered_set import OrderedSet
 from collections import OrderedDict
-def normalizeColumn(column: str, schema: Dict) -> str:
+def _get_alias_map(parsed_query) -> Dict[str, str]:
+    """Map alias -> actual_table_name and table_name -> table_name."""
+    alias_map = {}
+    for table_exp in parsed_query.find_all(sg.exp.Table):
+        t_name = table_exp.name
+        if not t_name:
+            continue
+        alias = table_exp.alias
+        if alias:
+            alias_map[alias] = t_name
+        alias_map[t_name] = t_name
+    return alias_map
+
+
+def normalizeColumn(column_node_or_name, schema: Dict, alias_map: Optional[Dict[str, str]] = None) -> str:
     '''
-    Input 
-        column : string
+    Input:
+        column_node_or_name : sg.exp.Column or string
         schema : Dict
-    Output 
-        result : table.column
+        alias_map : Dict[alias, table_name]
+    Output:
+        result : table.[column]
     '''
-    result = ""
-    for table,attrs in schema.items():
-        if column in attrs.keys():
-            result = f'{table}.[{column}]'
-    # print(result)
-    return result
+    if isinstance(column_node_or_name, sg.exp.Column):
+        col_name = column_node_or_name.name
+        tbl_ref = column_node_or_name.table
+    else:
+        col_name = str(column_node_or_name)
+        tbl_ref = None
 
-def getJoinCols(q: str, schema: Dict) ->OrderedSet:
+    # 1. If explicit table/alias is present on the column
+    if tbl_ref and alias_map:
+        real_tbl = alias_map.get(tbl_ref, tbl_ref)
+        if real_tbl in schema and col_name in schema[real_tbl]:
+            return f'{real_tbl}.[{col_name}]'
+
+    # 2. If table alias map exists from current query, check tables present in the query
+    if alias_map:
+        for real_tbl in alias_map.values():
+            if real_tbl in schema and col_name in schema[real_tbl]:
+                return f'{real_tbl}.[{col_name}]'
+
+    # 3. Fallback: search all schema tables
+    for table, attrs in schema.items():
+        if col_name in attrs.keys():
+            return f'{table}.[{col_name}]'
+
+    return ""
+
+
+def getJoinCols(q: str, schema: Dict) -> OrderedSet:
     result = OrderedSet()
     parsed_query = sg.parse_one(q)
+    alias_map = _get_alias_map(parsed_query)
 
-    # extract joins
     for joins in parsed_query.find_all(sg.exp.Join):
-        # print(joins)
         on_clause = joins.args.get("on")
-        # print(on_clause)
         if on_clause:
-            # print('Join on : ')
             for column in on_clause.find_all(sg.exp.Column):
-                # print(f'\tname : {column.name}')
-                normalized_col = normalizeColumn(column.name, schema)
-                if normalized_col == '':
-                    continue
-                result.add(normalized_col)
+                normalized_col = normalizeColumn(column, schema, alias_map)
+                if normalized_col:
+                    result.add(normalized_col)
     return result
 
-def getEqCols(q: str, schema: Dict) ->OrderedSet:
+
+def getEqCols(q: str, schema: Dict) -> OrderedSet:
     result = OrderedSet()
     parsed_query = sg.parse_one(q)
-    # extract equality column in where (no having, join)
+    alias_map = _get_alias_map(parsed_query)
 
     for where in parsed_query.find_all(sg.exp.Where):
         if where:
             for eq in where.find_all(sg.exp.EQ):
                 for column in eq.find_all(sg.exp.Column):
-                    normalized_col = normalizeColumn(column.name, schema)
-                    if normalized_col == '':
-                        continue
-                    result.add(normalized_col)
+                    normalized_col = normalizeColumn(column, schema, alias_map)
+                    if normalized_col:
+                        result.add(normalized_col)
     return result
 
-def getRangeCols(q: str, schema: Dict) ->OrderedSet:
+
+def getRangeCols(q: str, schema: Dict) -> OrderedSet:
     result = OrderedSet()
     parsed_query = sg.parse_one(q)
+    alias_map = _get_alias_map(parsed_query)
     range_operators = (sg.exp.GT, sg.exp.GTE, sg.exp.LT, sg.exp.LTE)
+
     for where in parsed_query.find_all(sg.exp.Where):
         if where:
-            for range in where.find_all(range_operators):
-                for column in range.find_all(sg.exp.Column):
-                    normalized_col = normalizeColumn(column.name, schema)
-                    if normalized_col == '':
-                        continue
-                    result.add(normalized_col)
+            for range_op in where.find_all(range_operators):
+                for column in range_op.find_all(sg.exp.Column):
+                    normalized_col = normalizeColumn(column, schema, alias_map)
+                    if normalized_col:
+                        result.add(normalized_col)
     return result
 
-def getOCols(q: str, schema: Dict) ->OrderedSet:
+
+def getOCols(q: str, schema: Dict) -> OrderedSet:
     result = OrderedSet()
     parsed_query = sg.parse_one(q)
+    alias_map = _get_alias_map(parsed_query)
     group_order = (sg.exp.Group, sg.exp.Order)
-    for range in parsed_query.find_all(group_order):
-        for column in range.find_all(sg.exp.Column):
-               normalized_col = normalizeColumn(column.name, schema)
-               if normalized_col == '':
-                   continue
-               result.add(normalized_col)
+
+    for go in parsed_query.find_all(group_order):
+        for column in go.find_all(sg.exp.Column):
+            normalized_col = normalizeColumn(column, schema, alias_map)
+            if normalized_col:
+                result.add(normalized_col)
     return result
 
 def applyRule1(J, EQ, RANGE):
@@ -109,6 +143,7 @@ def applyRule2(O:OrderedSet) ->OrderedSet:
 def applyRule3(q, schema):
     result = OrderedSet()
     parsed_query = sg.parse_one(q)
+    alias_map = _get_alias_map(parsed_query)
 
     temp = OrderedDict()
     # extract joins
@@ -120,12 +155,12 @@ def applyRule3(q, schema):
         if on_clause:
             for column in on_clause.find_all(sg.exp.Column):
                 # print(f'\tname : {column.name}')
-                normalized_col = normalizeColumn(column.name, schema)
-                if normalized_col == '':
+                normalized_col = normalizeColumn(column, schema, alias_map)
+                if not normalized_col:
                     continue
                 table = normalized_col.split('.')[0]
                 # column = normalized_col.split('.')[1]
-                if table not  in temp_dict.keys():
+                if table not in temp_dict.keys():
                     temp_dict[table] = column.name
                 else:
                     temp_dict[table] += (',' + column.name)

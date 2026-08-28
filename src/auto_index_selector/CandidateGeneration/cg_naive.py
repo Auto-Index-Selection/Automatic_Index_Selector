@@ -8,15 +8,13 @@ from .dexter import runDexter
 
 def generateCandidateIndexesWorkload(
     conn,
-    workload: List[str]
+    workload: List[str] = None
 ):
     """
-    Generate candidate indexes using Dexter.
+    Generate naive candidate indexes (combinations of single and pair columns across schema).
     """
-
-    candidates = runDexter(conn, workload)
-
-    return candidates
+    from .dexter import generateCandidateIndexes
+    return generateCandidateIndexes(conn, max_width=2)
 
 def numericIndex(candidates):
     """

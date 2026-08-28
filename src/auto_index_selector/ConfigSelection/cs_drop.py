@@ -69,8 +69,8 @@ def buildSizeMap(conn, candidate_indexes, size_cache=None):
 
 
 def dropHeuristic(conn, W, candidate_dict, storage_budget=float('inf'),
-                  max_group=2, cost_cache=None, size_cache=None,
-                  write_penalties=None, query_weights=None, verbose=False):
+                  budget_mb=None, max_group=2, cost_cache=None, size_cache=None,
+                  write_penalties=None, query_weights=None, verbose=False, **kwargs):
     """
     DROP heuristic (Whang 1985, Algorithm 1), adapted to storage budget,
     write penalties, and execution frequency weights.
@@ -81,6 +81,7 @@ def dropHeuristic(conn, W, candidate_dict, storage_budget=float('inf'),
     W              : list[str] SQL queries (the workload)
     candidate_dict : dict(table -> list[list[str]])
     storage_budget : maximum total index size in BYTES (default: infinity)
+    budget_mb      : maximum total index size in MEGABYTES (optional convenience)
     max_group      : largest group size to try removing at once (default: 2)
     write_penalties: dict optional {(table, (col,...)): penalty_float}
     query_weights  : dict optional {query_str: call_count_float}
@@ -88,7 +89,9 @@ def dropHeuristic(conn, W, candidate_dict, storage_budget=float('inf'),
     if cost_cache is None:
         cost_cache = {}
 
-    if storage_budget is not None:
+    if budget_mb is not None:
+        storage_budget = float(budget_mb) * 1024.0 * 1024.0 if budget_mb != float("inf") else float("inf")
+    elif storage_budget is not None:
         try:
             storage_budget = float(storage_budget)
         except (ValueError, TypeError):

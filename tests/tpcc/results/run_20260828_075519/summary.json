@@ -1,0 +1,13 @@
+{
+  "workload": "TPC-C",
+  "timestamp": "20260828_075519",
+  "duration_seconds": 15.646557569503784,
+  "iterations": 1,
+  "timeout_ms": null,
+  "results": {
+    "baseline": 0.93436649692012,
+    "cg_rule_based_config_sel_k5": 0.5226167250657454,
+    "cg_dta_config_sel_k5": 0.5228852080181241,
+    "cg_naive_config_sel_k5": 0.4973841000464745
+  }
+}
