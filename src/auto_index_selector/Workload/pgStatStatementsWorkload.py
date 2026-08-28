@@ -211,7 +211,6 @@ def get_delta_workload(
     conn,
     snap_before: PgStatSnapshot,
     snap_after: PgStatSnapshot,
-    limit: Optional[int] = None,
 ) -> Tuple[List[str], Dict[str, Dict[str, str]], Dict[str, float]]:
     """Compute query deltas across the observation window and return active queries.
 
@@ -239,8 +238,7 @@ def get_delta_workload(
 
     if deltas:
         deltas.sort(key=lambda x: -x[0])
-        selected_deltas = deltas[:limit] if limit is not None else deltas
-        for _, calls, q in selected_deltas:
+        for _, calls, q in deltas:
             resolved = resolver.resolve(q)
             queries.append(resolved)
             query_weights[resolved] = float(max(1, calls))
@@ -248,8 +246,7 @@ def get_delta_workload(
     else:
         # Fallback: if no new calls occurred during window, extract cumulative queries from after-snapshot
         all_entries = sorted(snap_after.entries.values(), key=lambda e: -e.total_exec_time)
-        selected_entries = all_entries[:limit] if limit is not None else all_entries
-        for entry in selected_entries:
+        for entry in all_entries:
             resolved = resolver.resolve(entry.query)
             queries.append(resolved)
             query_weights[resolved] = float(max(1, entry.calls))
@@ -258,11 +255,11 @@ def get_delta_workload(
     return queries, schema, query_weights
 
 
-def getWorkload(conn=None, limit: Optional[int] = None) -> Tuple[List[str], Dict[str, Dict[str, str]], Dict[str, float]]:
+def getWorkload(conn=None) -> Tuple[List[str], Dict[str, Dict[str, str]], Dict[str, float]]:
     """Single-call fallback interface matching the standard Workload module signature."""
     if conn is None:
         logger.warning("No live connection passed to pgStatStatementsWorkload. Returning default TPC-H schema.")
         return [], _DEFAULT_TPCH_SCHEMA, {}
 
     snap = take_snapshot(conn)
-    return get_delta_workload(conn, PgStatSnapshot(), snap, limit=limit)
+    return get_delta_workload(conn, PgStatSnapshot(), snap)
