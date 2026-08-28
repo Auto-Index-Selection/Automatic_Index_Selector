@@ -46,7 +46,7 @@ DROP TABLE IF EXISTS item CASCADE;
 DROP TABLE IF EXISTS warehouse CASCADE;
 
 CREATE TABLE warehouse (
-    w_id        INTEGER PRIMARY KEY,
+    w_id        INTEGER,
     w_name      VARCHAR(10),
     w_street_1  VARCHAR(20),
     w_street_2  VARCHAR(20),
@@ -68,8 +68,7 @@ CREATE TABLE district (
     d_zip       CHAR(9),
     d_tax       DECIMAL(4,4),
     d_ytd       DECIMAL(12,2),
-    d_next_o_id INTEGER,
-    PRIMARY KEY (d_w_id, d_id)
+    d_next_o_id INTEGER
 );
 
 CREATE TABLE customer (
@@ -93,8 +92,7 @@ CREATE TABLE customer (
     c_ytd_payment   DECIMAL(12,2),
     c_payment_cnt   INTEGER,
     c_delivery_cnt  INTEGER,
-    c_data          VARCHAR(500),
-    PRIMARY KEY (c_w_id, c_d_id, c_id)
+    c_data          VARCHAR(500)
 );
 
 CREATE TABLE history (
@@ -116,19 +114,17 @@ CREATE TABLE orders (
     o_entry_d       TIMESTAMP,
     o_carrier_id    INTEGER,
     o_ol_cnt        INTEGER,
-    o_all_local     INTEGER,
-    PRIMARY KEY (o_w_id, o_d_id, o_id)
+    o_all_local     INTEGER
 );
 
 CREATE TABLE new_orders (
     no_o_id     INTEGER,
     no_d_id     INTEGER,
-    no_w_id     INTEGER,
-    PRIMARY KEY (no_w_id, no_d_id, no_o_id)
+    no_w_id     INTEGER
 );
 
 CREATE TABLE item (
-    i_id        INTEGER PRIMARY KEY,
+    i_id        INTEGER,
     i_im_id     INTEGER,
     i_name      VARCHAR(24),
     i_price     DECIMAL(5,2),
@@ -152,8 +148,7 @@ CREATE TABLE stock (
     s_ytd           INTEGER,
     s_order_cnt     INTEGER,
     s_remote_cnt    INTEGER,
-    s_data          VARCHAR(50),
-    PRIMARY KEY (s_w_id, s_i_id)
+    s_data          VARCHAR(50)
 );
 
 CREATE TABLE order_line (
@@ -166,8 +161,7 @@ CREATE TABLE order_line (
     ol_delivery_d   TIMESTAMP,
     ol_quantity     INTEGER,
     ol_amount       DECIMAL(6,2),
-    ol_dist_info    CHAR(24),
-    PRIMARY KEY (ol_w_id, ol_d_id, ol_o_id, ol_number)
+    ol_dist_info    CHAR(24)
 );
 """
 

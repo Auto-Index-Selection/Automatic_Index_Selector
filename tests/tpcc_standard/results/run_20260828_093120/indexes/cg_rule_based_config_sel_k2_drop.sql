@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS ais_tpcc_std_customer_c_d_id_c_last;
+DROP INDEX IF EXISTS ais_tpcc_std_stock_s_i_id_s_w_id_s_quantity;

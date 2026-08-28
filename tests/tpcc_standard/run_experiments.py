@@ -46,7 +46,7 @@ from tests.tpcc_standard.tpcc_workload import load_tpcc_queries, fetch_schema
 RESULTS_DIR = Path(__file__).parent / "results"
 
 K_VALUES       = [2, 3, 5, 7, 10]
-BUDGET_MB_VALUES = [50, 100, 250, 500]
+BUDGET_MB_VALUES = [100, 250, 500, 1000]
 
 
 def build_experiment_list() -> List[dict]:
