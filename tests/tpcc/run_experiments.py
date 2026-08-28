@@ -1,16 +1,16 @@
 """
 tests/tpcc/run_experiments.py
 TPC-C (pgbench) strategy comparison framework.
-Reuses all shared modules from tests/tpch/ — only the workload loader and DB differ.
+Fully self-contained within tests/tpcc/.
 
 Usage
 -----
 # Full run (all CG × CS combinations, 3 iterations)
 PYTHONPATH=src python tests/tpcc/run_experiments.py
 
-# Quick smoke test: baseline + config_sel k=5, 1 iteration, no timeout
+# Quick smoke test: baseline + config_sel k=5, 1 iteration
 PYTHONPATH=src python tests/tpcc/run_experiments.py \
-  --only baseline config_sel --k 5 --no-timeout --iterations 1
+  --only baseline config_sel --k 5 --iterations 1
 
 # Re-generate plots from existing CSVs
 PYTHONPATH=src python tests/tpcc/run_experiments.py --plot-only
@@ -35,12 +35,10 @@ _REPO = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(_REPO / "src"))
 sys.path.insert(0, str(_REPO))
 
-# Shared runners / plotters from tpch (no code duplication)
-from tests.tpch.strategy_runner import run_baseline, run_strategy
-from tests.tpch.measure import prewarm_database_tables
-from tests.tpch.plot import generate_all_plots as _generate_all_plots
-
-# TPC-C specific workload
+# Self-contained TPC-C modules
+from tests.tpcc.strategy_runner import run_baseline, run_strategy
+from tests.tpcc.measure import prewarm_database_tables
+from tests.tpcc.plot import generate_all_plots
 from tests.tpcc.tpcc_workload import load_tpcc_queries, fetch_schema
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -108,20 +106,6 @@ def build_experiment_list() -> List[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Plot wrapper — redirects output to tpcc/results/plots/
-# ---------------------------------------------------------------------------
-
-def generate_all_plots(
-    results_dir: Optional[Path] = None,
-    plots_dir: Optional[Path] = None,
-):
-    """Wrapper that plots TPC-C data with workload_name='TPC-C'."""
-    target_results_dir = results_dir or RESULTS_DIR
-    target_plots_dir = plots_dir or (target_results_dir / "plots" if target_results_dir.name.startswith("run_") else RESULTS_DIR / "plots")
-    _generate_all_plots(results_dir=target_results_dir, plots_dir=target_plots_dir, workload_name="TPC-C")
-
-
-# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -132,9 +116,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--k", type=int, default=None)
     p.add_argument("--plot-only", action="store_true")
     p.add_argument("--no-plot", action="store_true")
-    p.add_argument("--timeout-ms", type=int, default=30_000)
-    p.add_argument("--no-timeout", action="store_true")
-    p.add_argument("--include-timed-out", action="store_true")
     p.add_argument(
         "--no-warmup", action="store_true",
         help="Skip the per-strategy pre-measurement warm-up pass.",
@@ -228,16 +209,7 @@ def main() -> int:
     print(f"  Plots:   {plots_dir}")
     print(f"  Indexes: {indexes_dir}")
 
-    # ---- Resolve timeout and warmup settings ----
-    timeout_ms    = None if args.no_timeout else args.timeout_ms
-    skip_timed_out = not args.include_timed_out
-    warmup        = not args.no_warmup
-
-    if timeout_ms:
-        print(f"Per-query timeout: {timeout_ms}ms — timed-out queries will be "
-              f"{'excluded' if skip_timed_out else 'counted as 0s'}")
-    else:
-        print("Per-query timeout: DISABLED")
+    warmup = not args.no_warmup
     print(f"Pre-warmup cache: {'ENABLED (fair buffer cache)' if warmup else 'DISABLED (cold start)'}")
     print()
 
@@ -247,8 +219,6 @@ def main() -> int:
     if run_baseline_flag:
         r = run_baseline(
             conn, queries, iterations=args.iterations,
-            statement_timeout_ms=timeout_ms,
-            skip_timed_out=skip_timed_out,
             results_dir=csv_dir,
             warmup=warmup,
         )
@@ -266,8 +236,6 @@ def main() -> int:
                 label=exp["label"],
                 cs_kwargs=exp["kwargs"],
                 iterations=args.iterations,
-                statement_timeout_ms=timeout_ms,
-                skip_timed_out=skip_timed_out,
                 results_dir=csv_dir,
                 indexes_dir=indexes_dir,
                 warmup=warmup,
@@ -295,8 +263,7 @@ def main() -> int:
         f"Workload: TPC-C\n"
         f"Timestamp: {timestamp}\n"
         f"Duration: {wall/60:.2f} minutes\n"
-        f"Iterations: {args.iterations}\n"
-        f"Timeout: {timeout_ms}ms\n\n"
+        f"Iterations: {args.iterations}\n\n"
         f"Rankings (avg seconds):\n" + "\n".join(summary_lines) + "\n"
     )
 
@@ -306,7 +273,6 @@ def main() -> int:
             "timestamp": timestamp,
             "duration_seconds": wall,
             "iterations": args.iterations,
-            "timeout_ms": timeout_ms,
             "results": results_summary,
         }, f, indent=2)
 
