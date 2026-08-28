@@ -321,10 +321,99 @@ def generate_tpcc_data(conn, num_warehouses: int = 2) -> None:
     print("Database population complete!")
 
 
+def load_with_hammerdb(db_host: str, db_port: str, db_user: str, db_pass: str,
+                       dbname: str, num_warehouses: int, num_vu: int = None,
+                       clean_slate: bool = True):
+    """
+    Builds official TPROC-C schema and loads dataset using HammerDB CLI.
+    """
+    import subprocess
+
+    hammerdb_dir = Path(__file__).resolve().parents[2] / "tools" / "HammerDB-6.0"
+    hammerdb_bin = hammerdb_dir / "hammerdbcli"
+
+    if not hammerdb_bin.exists():
+        raise FileNotFoundError(f"HammerDB CLI not found at {hammerdb_bin}")
+
+    if num_vu is None:
+        num_vu = min(num_warehouses, os.cpu_count() or 4)
+
+    # 1. Drop database first so HammerDB can build it clean
+    print(f"Preparing database {dbname} for HammerDB...")
+    conn = psycopg2.connect(dbname="postgres", user=db_user, password=db_pass, host=db_host, port=db_port)
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute(f"DROP DATABASE IF EXISTS {dbname};")
+    conn.close()
+
+    # 2. Write automated TCL script
+    tcl_script = f"""
+dbset db pg
+dbset bm TPROC-C
+diset connection pg_host {db_host}
+diset connection pg_port {db_port}
+diset tpcc pg_superuser {db_user}
+diset tpcc pg_superuserpass {db_pass}
+diset tpcc pg_defaultdbase postgres
+diset tpcc pg_dbase {dbname}
+diset tpcc pg_user {db_user}
+diset tpcc pg_pass {db_pass}
+diset tpcc pg_count_ware {num_warehouses}
+diset tpcc pg_num_vu {num_vu}
+diset tpcc pg_storedprocs true
+buildschema
+exit
+"""
+    tcl_file = hammerdb_dir / "build_tprocc.tcl"
+    tcl_file.write_text(tcl_script)
+
+    print(f"Executing HammerDB TPROC-C schema build ({num_warehouses} Warehouses, {num_vu} Virtual Users)...")
+    cmd = [str(hammerdb_bin), "auto", str(tcl_file)]
+    res = subprocess.run(cmd, cwd=str(hammerdb_dir), capture_output=True, text=True)
+    if "FINISHED SUCCESS" not in res.stdout or "FINISHED FAILED" in res.stdout:
+        print(res.stdout)
+        print(res.stderr)
+        raise RuntimeError("HammerDB schema build failed.")
+
+    print("HammerDB TPROC-C data loading completed successfully!")
+
+    # 3. Post-processing
+    target_conn = psycopg2.connect(dbname=dbname, user=db_user, password=db_pass, host=db_host, port=db_port)
+    target_conn.autocommit = True
+    target_cur = target_conn.cursor()
+
+    # Ensure table naming compatibility (new_order -> new_orders)
+    target_cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name='new_order';")
+    if target_cur.fetchone():
+        target_cur.execute("ALTER TABLE new_order RENAME TO new_orders;")
+
+    if clean_slate:
+        print("Stripping pre-created constraints & indexes for clean-slate AIS benchmarking...")
+        target_cur.execute("""
+            SELECT tc.table_name, tc.constraint_name 
+            FROM information_schema.table_constraints tc 
+            WHERE tc.table_schema = 'public' AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY');
+        """)
+        for table_name, constraint_name in target_cur.fetchall():
+            target_cur.execute(f"ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS {constraint_name} CASCADE;")
+
+        target_cur.execute("SELECT indexname FROM pg_indexes WHERE schemaname = 'public';")
+        for (idx,) in target_cur.fetchall():
+            target_cur.execute(f"DROP INDEX IF EXISTS {idx} CASCADE;")
+
+    target_cur.execute("CREATE EXTENSION IF NOT EXISTS hypopg;")
+    print("Running ANALYZE across all 9 tables...")
+    target_cur.execute("ANALYZE;")
+    target_conn.close()
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Setup TPC-C Standard Database")
-    parser.add_argument("--warehouses", "-w", type=int, default=2, help="Number of warehouses (Scale Factor)")
+    parser = argparse.ArgumentParser(description="Setup TPC-C Standard Database (HammerDB / Python)")
+    parser.add_argument("--warehouses", "-w", type=int, default=10, help="Number of warehouses (Scale Factor)")
     parser.add_argument("--dbname", type=str, default="tpcc_standard_db")
+    parser.add_argument("--vu", type=int, default=None, help="Number of HammerDB virtual users (default: auto)")
+    parser.add_argument("--no-hammerdb", action="store_true", help="Use fallback Python generator instead of HammerDB")
+    parser.add_argument("--keep-indexes", action="store_true", help="Keep default PK indexes (Methodology B)")
     args = parser.parse_args()
 
     load_dotenv()
@@ -333,28 +422,39 @@ def main():
     db_host = os.getenv("DB_HOST", "localhost")
     db_port = os.getenv("DB_PORT", "5432")
 
-    # Connect to default postgres to create database if not present
-    conn = psycopg2.connect(dbname="postgres", user=db_user, password=db_pass, host=db_host, port=db_port)
-    conn.autocommit = True
-    cur = conn.cursor()
-    cur.execute(f"SELECT 1 FROM pg_database WHERE datname = '{args.dbname}'")
-    if not cur.fetchone():
-        print(f"Creating database {args.dbname}...")
-        cur.execute(f"CREATE DATABASE {args.dbname};")
-    conn.close()
-
-    # Connect to target database and build schema
-    target_conn = psycopg2.connect(dbname=args.dbname, user=db_user, password=db_pass, host=db_host, port=db_port)
-    target_cur = target_conn.cursor()
-    print(f"Applying official 9-table TPC-C DDL schema to {args.dbname}...")
-    target_cur.execute(DDL_SCHEMA)
-    target_conn.commit()
+    hammerdb_bin = Path(__file__).resolve().parents[2] / "tools" / "HammerDB-6.0" / "hammerdbcli"
+    use_hammerdb = hammerdb_bin.exists() and not args.no_hammerdb
 
     t0 = time.time()
-    generate_tpcc_data(target_conn, num_warehouses=args.warehouses)
+    if use_hammerdb:
+        print(f"Using Official HammerDB TPROC-C Loader (binary: {hammerdb_bin})")
+        load_with_hammerdb(
+            db_host=db_host, db_port=db_port, db_user=db_user, db_pass=db_pass,
+            dbname=args.dbname, num_warehouses=args.warehouses, num_vu=args.vu,
+            clean_slate=not args.keep_indexes
+        )
+    else:
+        print("Using Built-in Python TPC-C Generator...")
+        conn = psycopg2.connect(dbname="postgres", user=db_user, password=db_pass, host=db_host, port=db_port)
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute(f"SELECT 1 FROM pg_database WHERE datname = '{args.dbname}'")
+        if not cur.fetchone():
+            print(f"Creating database {args.dbname}...")
+            cur.execute(f"CREATE DATABASE {args.dbname};")
+        conn.close()
+
+        target_conn = psycopg2.connect(dbname=args.dbname, user=db_user, password=db_pass, host=db_host, port=db_port)
+        target_cur = target_conn.cursor()
+        print(f"Applying official 9-table TPC-C DDL schema to {args.dbname}...")
+        target_cur.execute(DDL_SCHEMA)
+        target_conn.commit()
+
+        generate_tpcc_data(target_conn, num_warehouses=args.warehouses)
+        target_conn.close()
+
     elapsed = time.time() - t0
-    print(f"\n[DONE] Built {args.dbname} (Scale={args.warehouses} W) in {elapsed:.2f} seconds.")
-    target_conn.close()
+    print(f"\n[DONE] Built {args.dbname} (Scale={args.warehouses} W) via {'HammerDB' if use_hammerdb else 'Python'} in {elapsed:.2f} seconds.")
 
 
 if __name__ == "__main__":

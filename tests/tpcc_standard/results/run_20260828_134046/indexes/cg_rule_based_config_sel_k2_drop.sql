@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS ais_tpcc_std_order_line_ol_w_id_ol_d_id_ol_o_id;
+DROP INDEX IF EXISTS ais_tpcc_std_stock_s_i_id_s_w_id_s_quantity;
