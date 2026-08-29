@@ -118,110 +118,19 @@ class PlaceholderResolver:
         resolved = re.sub(r"\$(\d+)::([\w\s\[\]]+)", _repl_colon_cast, resolved, flags=re.IGNORECASE)
 
         # -------------------------------------------------------------
-        # 2. Date & Time Specific Syntax
+        # 2. Date & Time Specific Syntax & String Functions
         # -------------------------------------------------------------
+        resolved = re.sub(r"\bEXTRACT\s*\(\s*\$(\d+)\s+FROM", "EXTRACT(year FROM", resolved, flags=re.IGNORECASE)
         resolved = re.sub(r"\bdate\s+\$(\d+)", "date '1998-01-01'", resolved, flags=re.IGNORECASE)
         resolved = re.sub(r"\btimestamp\s+\$(\d+)", "timestamp '1998-01-01 00:00:00'", resolved, flags=re.IGNORECASE)
         resolved = re.sub(r"\bINTERVAL\s+\$(\d+)", "INTERVAL '1 day'", resolved, flags=re.IGNORECASE)
         resolved = re.sub(r"\bINTERVAL\s+'\$(\d+)'", "INTERVAL '1 day'", resolved, flags=re.IGNORECASE)
         resolved = re.sub(r"DATE_TRUNC\s*\(\s*\$(\d+)\s*,", "DATE_TRUNC('day',", resolved, flags=re.IGNORECASE)
+        resolved = re.sub(r"\bSUBSTRING\s*\(\s*(.*?)\s+FROM\s+\$(\d+)\s+FOR\s+\$(\d+)\s*\)", r"SUBSTRING(\1 FROM 1 FOR 2)", resolved, flags=re.IGNORECASE)
+        resolved = re.sub(r"\bSUBSTRING\s*\(\s*(\w+)\s+FROM\s+1\s+FOR\s+2\s*\)\s*IN\s*\(([^)]+)\)", r"SUBSTRING(\1 FROM 1 FOR 2) IN ('13', '31', '23')", resolved, flags=re.IGNORECASE)
 
         # -------------------------------------------------------------
-        # 3. Full-Text Search Functions
-        # -------------------------------------------------------------
-        resolved = re.sub(r"\b(to_tsquery|plainto_tsquery|phraseto_tsquery|websearch_to_tsquery)\s*\(\s*\$(\d+)\s*\)", r"\1('a')", resolved, flags=re.IGNORECASE)
-        resolved = re.sub(r"\bto_tsvector\s*\(\s*\$(\d+)\s*\)", "to_tsvector('a')", resolved, flags=re.IGNORECASE)
-        resolved = re.sub(r"@@\s*\$(\d+)", "@@ to_tsquery('a')", resolved, flags=re.IGNORECASE)
-
-        # -------------------------------------------------------------
-        # 4. JSON / JSONB Operators (->, ->>, ?, ?|, ?&, @>, <@)
-        # -------------------------------------------------------------
-        resolved = re.sub(r"(->>|->|\?|\?\||\?&)\s*\$(\d+)", r"\1 'key'", resolved, flags=re.IGNORECASE)
-        resolved = re.sub(r"(@>|<@)\s*\$(\d+)", r"\1 '{}'::jsonb", resolved, flags=re.IGNORECASE)
-
-        # -------------------------------------------------------------
-        # 5. Array Operators (= ANY($N), $N = ANY(col), UNNEST($N), ARRAY containment)
-        # -------------------------------------------------------------
-        resolved = re.sub(r"(=\s*ANY\s*\(|IN\s*\(ARRAY)\s*\$(\d+)\s*\)", r"= ANY(ARRAY[1])", resolved, flags=re.IGNORECASE)
-        resolved = re.sub(r"\$(\d+)\s*=\s*ANY\s*\(\s*(\w+)\s*\)", r"1 = ANY(\2)", resolved, flags=re.IGNORECASE)
-        resolved = re.sub(r"\bUNNEST\s*\(\s*\$(\d+)\s*\)", "UNNEST(ARRAY[1])", resolved, flags=re.IGNORECASE)
-
-        # -------------------------------------------------------------
-        # 6. Schema & Catalog Function Calls: func_name($1, $2, ...)
-        # -------------------------------------------------------------
-        _SQL_KEYWORDS = {"in", "exists", "any", "all", "select", "from", "where", "and", "or", "values", "not", "case", "when", "then", "else", "end", "with", "having", "group", "order"}
-
-        def _repl_func(m):
-            func_name, inside = m.group(1), m.group(2)
-            if func_name.lower() in _SQL_KEYWORDS or re.search(r'\bSELECT\b', inside, re.I):
-                return m.group(0)
-            arg_types = self._func_types.get(func_name.lower())
-            if arg_types:
-                parts = [p.strip() for p in inside.split(',')]
-                new_parts = []
-                for i, part in enumerate(parts):
-                    if '$' in part and i < len(arg_types):
-                        lit = self._type_to_literal(arg_types[i])
-                        new_parts.append(re.sub(r'\$\d+', lit, part))
-                    else:
-                        new_parts.append(part)
-                return f"{func_name}({', '.join(new_parts)})"
-            return m.group(0)
-
-        resolved = re.sub(r'(\b[a-zA-Z_]\w*)\s*\(([^()]*\$\d+[^()]*)\)', _repl_func, resolved)
-
-        # -------------------------------------------------------------
-        # 7. Schema-Driven BETWEEN: (table.)col BETWEEN $1 AND $2
-        # -------------------------------------------------------------
-        def _repl_between(m):
-            col = m.group(1)
-            col_clean = col.split(".")[-1].lower()
-            dtype = self._col_types.get(col_clean, "INT")
-            v1 = self._type_to_literal(dtype)
-            v2 = self._type_to_literal(dtype)
-            return f"{col} BETWEEN {v1} AND {v2}"
-
-        resolved = re.sub(
-            r'(\w+(?:\.\w+)?)\s+BETWEEN\s+\$(\d+)\s+AND\s+\$(\d+)',
-            _repl_between,
-            resolved,
-            flags=re.IGNORECASE
-        )
-
-        # -------------------------------------------------------------
-        # 8. Pattern Matching: LIKE, ILIKE, SIMILAR TO, Regex (~, ~*)
-        # -------------------------------------------------------------
-        resolved = re.sub(
-            r'(\bNOT\s+LIKE|\bLIKE|\bNOT\s+ILIKE|\bILIKE|\bSIMILAR\s+TO)\s*\$(\d+)',
-            r"\1 'A%'",
-            resolved,
-            flags=re.IGNORECASE
-        )
-        resolved = re.sub(r'(!~|!~\*|~|~\*)\s*\$(\d+)', r"\1 '^A'", resolved, flags=re.IGNORECASE)
-
-        # -------------------------------------------------------------
-        # 9. Schema-Driven Multi-item IN / NOT IN lists: (table.)col IN ($1, $2, ...) (excluding subqueries)
-        # -------------------------------------------------------------
-        def _repl_in(m):
-            col, op, inside = m.group(1), m.group(2), m.group(3)
-            # If inside parentheses is a subquery (contains SELECT), leave it to inner column resolution
-            if re.search(r'\bSELECT\b', inside, re.I):
-                return m.group(0)
-            col_clean = col.split(".")[-1].lower()
-            dtype = self._col_types.get(col_clean, "INT")
-            val = self._type_to_literal(dtype)
-            new_inside = re.sub(r'\$\d+', val, inside)
-            return f"{col} {op} ({new_inside})"
-
-        resolved = re.sub(
-            r'(\w+(?:\.\w+)?)\s*(\bIN\b|\bNOT\s+IN\b)\s*\(([^)]+)\)',
-            _repl_in,
-            resolved,
-            flags=re.IGNORECASE
-        )
-
-        # -------------------------------------------------------------
-        # 10. Schema-Driven Direct Column Comparisons: (table.)col [=><!] $N and $N [=><!] (table.)col
+        # 3. Schema-Driven Direct Column Comparisons (Run early for exact column type matching)
         # -------------------------------------------------------------
         def _repl_schema_col_right(m):
             col, op = m.group(1), m.group(2)
@@ -254,6 +163,99 @@ class PlaceholderResolver:
             resolved,
             flags=re.IGNORECASE
         )
+
+        # -------------------------------------------------------------
+        # 4. Schema-Driven BETWEEN: (table.)col BETWEEN $1 AND $2
+        # -------------------------------------------------------------
+        def _repl_between(m):
+            col = m.group(1)
+            col_clean = col.split(".")[-1].lower()
+            dtype = self._col_types.get(col_clean, "INT")
+            v1 = self._type_to_literal(dtype)
+            v2 = self._type_to_literal(dtype)
+            return f"{col} BETWEEN {v1} AND {v2}"
+
+        resolved = re.sub(
+            r'(\w+(?:\.\w+)?)\s+BETWEEN\s+\$(\d+)\s+AND\s+\$(\d+)',
+            _repl_between,
+            resolved,
+            flags=re.IGNORECASE
+        )
+
+        # -------------------------------------------------------------
+        # 5. Schema-Driven Multi-item IN / NOT IN lists: (table.)col IN ($1, $2, ...)
+        # -------------------------------------------------------------
+        def _repl_in(m):
+            col, op, inside = m.group(1), m.group(2), m.group(3)
+            if re.search(r'\bSELECT\b', inside, re.I):
+                return m.group(0)
+            col_clean = col.split(".")[-1].lower()
+            dtype = self._col_types.get(col_clean, "INT")
+            val = self._type_to_literal(dtype)
+            new_inside = re.sub(r'\$\d+', val, inside)
+            return f"{col} {op} ({new_inside})"
+
+        resolved = re.sub(
+            r'(\w+(?:\.\w+)?)\s*(\bIN\b|\bNOT\s+IN\b)\s*\(([^)]+)\)',
+            _repl_in,
+            resolved,
+            flags=re.IGNORECASE
+        )
+
+        # -------------------------------------------------------------
+        # 6. Full-Text Search Functions
+        # -------------------------------------------------------------
+        resolved = re.sub(r"\b(to_tsquery|plainto_tsquery|phraseto_tsquery|websearch_to_tsquery)\s*\(\s*\$(\d+)\s*\)", r"\1('a')", resolved, flags=re.IGNORECASE)
+        resolved = re.sub(r"\bto_tsvector\s*\(\s*\$(\d+)\s*\)", "to_tsvector('a')", resolved, flags=re.IGNORECASE)
+        resolved = re.sub(r"@@\s*\$(\d+)", "@@ to_tsquery('a')", resolved, flags=re.IGNORECASE)
+
+        # -------------------------------------------------------------
+        # 7. JSON / JSONB Operators (->, ->>, ?, ?|, ?&, @>, <@)
+        # -------------------------------------------------------------
+        resolved = re.sub(r"(->>|->|\?|\?\||\?&)\s*\$(\d+)", r"\1 'key'", resolved, flags=re.IGNORECASE)
+        resolved = re.sub(r"(@>|<@)\s*\$(\d+)", r"\1 '{}'::jsonb", resolved, flags=re.IGNORECASE)
+
+        # -------------------------------------------------------------
+        # 8. Array Operators (= ANY($N), $N = ANY(col), UNNEST($N), ARRAY containment)
+        # -------------------------------------------------------------
+        resolved = re.sub(r"(=\s*ANY\s*\(|IN\s*\(ARRAY)\s*\$(\d+)\s*\)", r"= ANY(ARRAY[1])", resolved, flags=re.IGNORECASE)
+        resolved = re.sub(r"\$(\d+)\s*=\s*ANY\s*\(\s*(\w+)\s*\)", r"1 = ANY(\2)", resolved, flags=re.IGNORECASE)
+        resolved = re.sub(r"\bUNNEST\s*\(\s*\$(\d+)\s*\)", "UNNEST(ARRAY[1])", resolved, flags=re.IGNORECASE)
+
+        # -------------------------------------------------------------
+        # 9. Pattern Matching: LIKE, ILIKE, SIMILAR TO, Regex (~, ~*)
+        # -------------------------------------------------------------
+        resolved = re.sub(
+            r'(\bNOT\s+LIKE|\bLIKE|\bNOT\s+ILIKE|\bILIKE|\bSIMILAR\s+TO)\s*\$(\d+)',
+            r"\1 'A%'",
+            resolved,
+            flags=re.IGNORECASE
+        )
+        resolved = re.sub(r'(!~|!~\*|~|~\*)\s*\$(\d+)', r"\1 '^A'", resolved, flags=re.IGNORECASE)
+
+        # -------------------------------------------------------------
+        # 10. Schema & Catalog Function Calls: func_name($1, $2, ...)
+        # -------------------------------------------------------------
+        _SQL_KEYWORDS = {"in", "exists", "any", "all", "select", "from", "where", "and", "or", "values", "not", "case", "when", "then", "else", "end", "with", "having", "group", "order"}
+
+        def _repl_func(m):
+            func_name, inside = m.group(1), m.group(2)
+            if func_name.lower() in _SQL_KEYWORDS or re.search(r'\bSELECT\b', inside, re.I) or re.search(r'\bCASE\b', inside, re.I):
+                return m.group(0)
+            arg_types = self._func_types.get(func_name.lower())
+            if arg_types:
+                parts = [p.strip() for p in inside.split(',')]
+                new_parts = []
+                for i, part in enumerate(parts):
+                    if '$' in part and i < len(arg_types):
+                        lit = self._type_to_literal(arg_types[i])
+                        new_parts.append(re.sub(r'\$\d+', lit, part))
+                    else:
+                        new_parts.append(part)
+                return f"{func_name}({', '.join(new_parts)})"
+            return m.group(0)
+
+        resolved = re.sub(r'(\b[a-zA-Z_]\w*)\s*\(([^()]*\$\d+[^()]*)\)', _repl_func, resolved)
 
         # -------------------------------------------------------------
         # 11. Pagination & Limits
@@ -341,6 +343,14 @@ def take_snapshot(conn) -> PgStatSnapshot:
                   AND query NOT ILIKE '%pg_settings%'
                   AND query NOT ILIKE '%pg_catalog%'
                   AND query NOT ILIKE '%current_setting%'
+                  AND query NOT ILIKE '%pg_proc%'
+                  AND query NOT ILIKE '%pg_class%'
+                  AND query NOT ILIKE '%pg_roles%'
+                  AND query NOT ILIKE '%pg_tables%'
+                  AND query NOT ILIKE '%pg_extension%'
+                  AND query NOT ILIKE '%pg_namespace%'
+                  AND query NOT ILIKE '%pg_database%'
+                  AND query NOT ILIKE '%pg_type%'
                   AND query ILIKE 'SELECT%'
                   AND query NOT ILIKE 'SELECT 1%';
             """)
