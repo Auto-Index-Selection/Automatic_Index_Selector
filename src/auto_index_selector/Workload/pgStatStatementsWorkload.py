@@ -221,9 +221,9 @@ class PlaceholderResolver:
         )
 
         # -------------------------------------------------------------
-        # 10. Schema-Driven Direct Column Comparisons: (table.)col [=><!] $N
+        # 10. Schema-Driven Direct Column Comparisons: (table.)col [=><!] $N and $N [=><!] (table.)col
         # -------------------------------------------------------------
-        def _repl_schema_col(m):
+        def _repl_schema_col_right(m):
             col, op = m.group(1), m.group(2)
             col_clean = col.split(".")[-1].lower()
             dtype = self._col_types.get(col_clean)
@@ -233,8 +233,24 @@ class PlaceholderResolver:
             return m.group(0)
 
         resolved = re.sub(
-            r'(\w+(?:\.\w+)?)\s*([=><!]+|IS\s+NOT|IS)\s*\$(\d+)',
-            _repl_schema_col,
+            r'(\b[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)?)\s*([=><!]+|IS\s+NOT|IS)\s*\$(\d+)',
+            _repl_schema_col_right,
+            resolved,
+            flags=re.IGNORECASE
+        )
+
+        def _repl_schema_col_left(m):
+            op, col = m.group(2), m.group(3)
+            col_clean = col.split(".")[-1].lower()
+            dtype = self._col_types.get(col_clean)
+            if dtype:
+                val = self._type_to_literal(dtype)
+                return f"{val} {op} {col}"
+            return m.group(0)
+
+        resolved = re.sub(
+            r'\$(\d+)\s*([=><!]+)\s*(\b[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)?)',
+            _repl_schema_col_left,
             resolved,
             flags=re.IGNORECASE
         )
