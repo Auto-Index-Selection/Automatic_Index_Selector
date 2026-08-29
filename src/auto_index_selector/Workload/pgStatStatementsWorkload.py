@@ -19,7 +19,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -43,17 +43,22 @@ class PgStatSnapshot:
 class PlaceholderResolver:
     """Substitutes $1, $2, ... placeholders in pg_stat_statements queries with typed dummy literals.
 
-    Resolution is driven purely by live PostgreSQL schema inspection (information_schema)
+    Resolution is driven purely by live PostgreSQL schema inspection (information_schema & pg_proc)
     and standard SQL syntax constructs, completely independent of specific column names or workloads.
     """
 
-    def __init__(self, schema: Optional[Dict[str, Dict[str, str]]] = None) -> None:
+    def __init__(self, schema: Optional[Dict[str, Any]] = None) -> None:
         self._schema = schema or {}
         # Build flattened column -> datatype map for fast O(1) lookup
         self._col_types: Dict[str, str] = {}
+        self._func_types: Dict[str, List[str]] = {}
+
         for table, cols in self._schema.items():
-            for col, dtype in cols.items():
-                self._col_types[col.lower()] = dtype.upper()
+            if table == "_functions" and isinstance(cols, dict):
+                self._func_types = {k.lower(): v for k, v in cols.items()}
+            elif isinstance(cols, dict):
+                for col, dtype in cols.items():
+                    self._col_types[col.lower()] = dtype.upper()
 
     def _type_to_literal(self, dtype: str, is_like: bool = False, is_array: bool = False) -> str:
         d = dtype.upper()
@@ -77,11 +82,11 @@ class PlaceholderResolver:
             return "DATE '1998-01-01'"
         if any(t in d for t in ("TIME", "TIMESTAMP")):
             return "TIMESTAMP '1998-01-01 00:00:00'"
-        if any(t in d for t in ("INT", "SERIAL", "BIGINT", "SMALLINT")):
+        if any(t in d for t in ("INT", "INT2", "INT4", "INT8", "SERIAL", "BIGINT", "SMALLINT")):
             return "1"
-        if any(t in d for t in ("FLOAT", "DOUBLE", "REAL", "NUMERIC", "DECIMAL", "MONEY")):
+        if any(t in d for t in ("FLOAT", "FLOAT4", "FLOAT8", "DOUBLE", "REAL", "NUMERIC", "DECIMAL", "MONEY")):
             return "1.0"
-        if any(t in d for t in ("CHAR", "VARCHAR", "TEXT", "NAME", "BPCHAR")):
+        if any(t in d for t in ("CHAR", "VARCHAR", "TEXT", "NAME", "BPCHAR", "CSTRING")):
             return "'A'"
         if any(t in d for t in ("BYTEA",)):
             return "'\\x00'::bytea"
@@ -142,7 +147,27 @@ class PlaceholderResolver:
         resolved = re.sub(r"\bUNNEST\s*\(\s*\$(\d+)\s*\)", "UNNEST(ARRAY[1])", resolved, flags=re.IGNORECASE)
 
         # -------------------------------------------------------------
-        # 6. Schema-Driven BETWEEN: (table.)col BETWEEN $1 AND $2
+        # 6. Schema & Catalog Function Calls: func_name($1, $2, ...)
+        # -------------------------------------------------------------
+        def _repl_func(m):
+            func_name, inside = m.group(1), m.group(2)
+            arg_types = self._func_types.get(func_name.lower())
+            if arg_types:
+                parts = [p.strip() for p in inside.split(',')]
+                new_parts = []
+                for i, part in enumerate(parts):
+                    if '$' in part and i < len(arg_types):
+                        lit = self._type_to_literal(arg_types[i])
+                        new_parts.append(re.sub(r'\$\d+', lit, part))
+                    else:
+                        new_parts.append(part)
+                return f"{func_name}({', '.join(new_parts)})"
+            return m.group(0)
+
+        resolved = re.sub(r'(\b[a-zA-Z_]\w*)\s*\(([^()]*\$\d+[^()]*)\)', _repl_func, resolved)
+
+        # -------------------------------------------------------------
+        # 7. Schema-Driven BETWEEN: (table.)col BETWEEN $1 AND $2
         # -------------------------------------------------------------
         def _repl_between(m):
             col = m.group(1)
@@ -160,7 +185,7 @@ class PlaceholderResolver:
         )
 
         # -------------------------------------------------------------
-        # 7. Pattern Matching: LIKE, ILIKE, SIMILAR TO, Regex (~, ~*)
+        # 8. Pattern Matching: LIKE, ILIKE, SIMILAR TO, Regex (~, ~*)
         # -------------------------------------------------------------
         resolved = re.sub(
             r'(\bNOT\s+LIKE|\bLIKE|\bNOT\s+ILIKE|\bILIKE|\bSIMILAR\s+TO)\s*\$(\d+)',
@@ -171,7 +196,7 @@ class PlaceholderResolver:
         resolved = re.sub(r'(!~|!~\*|~|~\*)\s*\$(\d+)', r"\1 '^A'", resolved, flags=re.IGNORECASE)
 
         # -------------------------------------------------------------
-        # 8. Schema-Driven Multi-item IN / NOT IN lists: (table.)col IN ($1, $2, ...)
+        # 9. Schema-Driven Multi-item IN / NOT IN lists: (table.)col IN ($1, $2, ...)
         # -------------------------------------------------------------
         def _repl_in(m):
             col, op, inside = m.group(1), m.group(2), m.group(3)
@@ -189,7 +214,7 @@ class PlaceholderResolver:
         )
 
         # -------------------------------------------------------------
-        # 9. Schema-Driven Direct Column Comparisons: (table.)col [=><!] $N
+        # 10. Schema-Driven Direct Column Comparisons: (table.)col [=><!] $N
         # -------------------------------------------------------------
         def _repl_schema_col(m):
             col, op = m.group(1), m.group(2)
@@ -208,28 +233,29 @@ class PlaceholderResolver:
         )
 
         # -------------------------------------------------------------
-        # 10. Pagination & Limits
+        # 11. Pagination & Limits
         # -------------------------------------------------------------
         resolved = re.sub(r'\bLIMIT\s*\$(\d+)', "LIMIT 10", resolved, flags=re.IGNORECASE)
         resolved = re.sub(r'\bOFFSET\s*\$(\d+)', "OFFSET 0", resolved, flags=re.IGNORECASE)
         resolved = re.sub(r'\bFETCH\s+FIRST\s+\$(\d+)\s+ROWS\s+ONLY', "FETCH FIRST 10 ROWS ONLY", resolved, flags=re.IGNORECASE)
 
         # -------------------------------------------------------------
-        # 11. Safe Final Fallback
+        # 12. Safe Final Fallback
         # -------------------------------------------------------------
         resolved = re.sub(r'\$\d+', '1', resolved)
 
         return resolved
 
 
-def fetch_live_schema(conn) -> Dict[str, Dict[str, str]]:
-    """Fetch table and column schema mapping from PostgreSQL information_schema."""
-    schema: Dict[str, Dict[str, str]] = {}
+def fetch_live_schema(conn) -> Dict[str, Any]:
+    """Fetch table/column schema and function signatures from PostgreSQL catalogs."""
+    schema: Dict[str, Any] = {}
     if conn is None:
         return schema
 
     try:
         with conn.cursor() as cur:
+            # 1. Fetch all table column types
             cur.execute("""
                 SELECT table_name, column_name, data_type
                 FROM information_schema.columns
@@ -238,8 +264,35 @@ def fetch_live_schema(conn) -> Dict[str, Dict[str, str]]:
             """)
             for table_name, column_name, data_type in cur.fetchall():
                 schema.setdefault(table_name, {})[column_name] = data_type.upper()
+
+            # 2. Fetch function argument signatures from pg_proc
+            cur.execute("""
+                SELECT 
+                    p.proname,
+                    COALESCE(
+                        array_to_string(
+                            ARRAY(
+                                SELECT t.typname 
+                                FROM unnest(p.proargtypes) WITH ORDINALITY AS a(oid, ord)
+                                JOIN pg_type t ON t.oid = a.oid
+                                ORDER BY a.ord
+                            ),
+                            ','
+                        ),
+                        ''
+                    ) AS arg_types
+                FROM pg_proc p
+                JOIN pg_namespace n ON n.oid = p.pronamespace
+                WHERE n.nspname IN ('public', 'pg_catalog')
+                  AND p.pronargs > 0;
+            """)
+            func_dict = {}
+            for proname, arg_types_str in cur.fetchall():
+                if arg_types_str:
+                    func_dict[proname.lower()] = [t.strip().upper() for t in arg_types_str.split(",") if t.strip()]
+            schema["_functions"] = func_dict
     except Exception as e:
-        logger.warning("Could not fetch information_schema: %s", e)
+        logger.warning("Could not fetch database schema / pg_proc: %s", e)
         if conn:
             conn.rollback()
         return {}
