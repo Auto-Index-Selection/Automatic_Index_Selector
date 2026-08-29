@@ -32,12 +32,15 @@ try:
 except ModuleNotFoundError:  # Python < 3.11
     import tomli as tomllib
 
+from auto_index_selector.Workload.pgStatStatementsWorkload import (
+    take_snapshot,
+    get_delta_workload,
+)
+
 # Maps each config.toml section -> the Python package it should import from.
-# Adjust these dotted paths if your package/src layout changes.
 SECTION_TO_PACKAGE = {
     "candidate_generation": "auto_index_selector.CandidateGeneration",
     "config_selection": "auto_index_selector.ConfigSelection",
-    "workload": "auto_index_selector.Workload",
 }
 
 def _find_config_path() -> Path:
@@ -94,8 +97,8 @@ def import_selected_module(section: str, config: dict):
 
 def load_pipeline(config_path: Path = DEFAULT_CONFIG_PATH):
     """
-    Load config.toml and import the three selected stage modules.
-    Returns a dict: {"candidate_generation": module, "config_selection": module, "workload": module}
+    Load config.toml and import the algorithmic stage modules (CandidateGeneration, ConfigSelection).
+    Returns a dict: {"candidate_generation": module, "config_selection": module}
     """
     config = load_config(config_path)
 
@@ -113,22 +116,11 @@ def main():
 
     cg_module = pipeline["candidate_generation"]
     cs_module = pipeline["config_selection"]
-    wl_module = pipeline["workload"]
 
     print(f"[CandidateGeneration] using module: {cg_module.__name__}")
     print(f"[ConfigSelection]     using module: {cs_module.__name__}")
-    print(f"[Workload]            using module: {wl_module.__name__}")
+    print(f"[Workload]            using pg_stat_statements (live delta workload)")
 
-    # --- Wire the pipeline together below ---
-    # These calls assume each stage module exposes a conventional entry
-    # point (e.g. a function named `run(...)`). Adjust to match your
-    # actual module APIs (cg_auto_admin.py, config_sel.py, tpchWorkload.py, etc.)
-    #
-    # workload = wl_module.load_workload()
-    # candidates = cg_module.generate_candidates(workload)
-    # selected_config = cs_module.select_config(candidates, workload)
-    # print(selected_config)
-    
     # connection setup
     load_dotenv()
     conn = psycopg2.connect(
@@ -145,7 +137,6 @@ def main():
     wp_enabled = wp_config.get("enabled", False)
     wp_estimator = None
     snap_before_writes = None
-    snap_before_reads = None
 
     if wp_enabled:
         from auto_index_selector.CostEstimator.write_penalty_estimator import WritePenaltyEstimator
@@ -155,9 +146,8 @@ def main():
         snap_before_writes = wp_estimator.snapshot()
         print(f"[WritePenalty] Captured write before-snapshot (scale={write_scale})")
 
-    if hasattr(wl_module, "take_snapshot"):
-        snap_before_reads = wl_module.take_snapshot(conn)
-        print(f"[Workload] Captured pg_stat_statements before-snapshot ({len(snap_before_reads.entries)} queries tracked)")
+    snap_before_reads = take_snapshot(conn)
+    print(f"[Workload] Captured pg_stat_statements before-snapshot ({len(snap_before_reads.entries)} queries tracked)")
 
     # --- 2. Observation Window (Wait for background application/simulator traffic) ---
     duration = int(wp_config.get("window_duration_seconds", 0))
@@ -167,20 +157,14 @@ def main():
         time.sleep(duration)
 
     # --- Capture both after-snapshots immediately when observation window ends ---
-    snap_after_reads = None
-    if hasattr(wl_module, "take_snapshot") and snap_before_reads is not None:
-        snap_after_reads = wl_module.take_snapshot(conn)
+    snap_after_reads = take_snapshot(conn)
 
     snap_after_writes = None
     if wp_enabled and wp_estimator and snap_before_writes:
         snap_after_writes = wp_estimator.snapshot()
 
     # --- 3. Extract Read Workload (Delta Queries & Execution Weights) ---
-    query_weights = {}
-    if hasattr(wl_module, "get_delta_workload") and snap_before_reads is not None and snap_after_reads is not None:
-        W, schema, query_weights = wl_module.get_delta_workload(conn, snap_before_reads, snap_after_reads)
-    else:
-        W, schema, query_weights = wl_module.getWorkload(conn=conn)
+    W, schema, query_weights = get_delta_workload(conn, snap_before_reads, snap_after_reads)
     print(f"Loaded Workload: {len(W)} active queries loaded (weighted by pg_stat_statements call counts).")
 
     # --- 4. Candidate Generation ---
