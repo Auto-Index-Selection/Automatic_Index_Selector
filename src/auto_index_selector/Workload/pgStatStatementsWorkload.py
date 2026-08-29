@@ -41,11 +41,15 @@ class PgStatSnapshot:
 
 
 class PlaceholderResolver:
-    """Substitutes $1, $2, ... placeholders in pg_stat_statements queries with typed dummy literals."""
+    """Substitutes $1, $2, ... placeholders in pg_stat_statements queries with typed dummy literals.
+
+    Resolution is driven purely by live PostgreSQL schema inspection (information_schema)
+    and standard SQL syntax constructs, completely independent of specific column names or workloads.
+    """
 
     def __init__(self, schema: Optional[Dict[str, Dict[str, str]]] = None) -> None:
         self._schema = schema or {}
-        # Build flattened column -> datatype map for fast lookup
+        # Build flattened column -> datatype map for fast O(1) lookup
         self._col_types: Dict[str, str] = {}
         for table, cols in self._schema.items():
             for col, dtype in cols.items():
@@ -138,22 +142,14 @@ class PlaceholderResolver:
         resolved = re.sub(r"\bUNNEST\s*\(\s*\$(\d+)\s*\)", "UNNEST(ARRAY[1])", resolved, flags=re.IGNORECASE)
 
         # -------------------------------------------------------------
-        # 6. BETWEEN: col BETWEEN $1 AND $2
+        # 6. Schema-Driven BETWEEN: (table.)col BETWEEN $1 AND $2
         # -------------------------------------------------------------
         def _repl_between(m):
             col = m.group(1)
             col_clean = col.split(".")[-1].lower()
-            dtype = self._col_types.get(col_clean)
-            if dtype:
-                v1, v2 = self._type_to_literal(dtype), self._type_to_literal(dtype)
-            elif re.search(r'(date|time|since|created|updated)', col_clean, re.I):
-                v1, v2 = "DATE '1998-01-01'", "DATE '2026-01-01'"
-            elif re.search(r'(price|rate|cost|amount|balance|discount|tax|qty|quantity)', col_clean, re.I):
-                v1, v2 = "0.0", "100.0"
-            elif re.search(r'(name|last|first|city|state|code|status|type)', col_clean, re.I):
-                v1, v2 = "'A'", "'Z'"
-            else:
-                v1, v2 = "1", "100"
+            dtype = self._col_types.get(col_clean, "INT")
+            v1 = self._type_to_literal(dtype)
+            v2 = self._type_to_literal(dtype)
             return f"{col} BETWEEN {v1} AND {v2}"
 
         resolved = re.sub(
@@ -175,24 +171,13 @@ class PlaceholderResolver:
         resolved = re.sub(r'(!~|!~\*|~|~\*)\s*\$(\d+)', r"\1 '^A'", resolved, flags=re.IGNORECASE)
 
         # -------------------------------------------------------------
-        # 8. Multi-item IN / NOT IN lists: col IN ($1, $2, ...)
+        # 8. Schema-Driven Multi-item IN / NOT IN lists: (table.)col IN ($1, $2, ...)
         # -------------------------------------------------------------
         def _repl_in(m):
             col, op, inside = m.group(1), m.group(2), m.group(3)
             col_clean = col.split(".")[-1].lower()
-            dtype = self._col_types.get(col_clean)
-            if dtype:
-                val = self._type_to_literal(dtype)
-            elif re.search(r'(uuid|guid)', col_clean, re.I):
-                val = "'00000000-0000-0000-0000-000000000000'"
-            elif re.search(r'(date|time|since|created|updated)', col_clean, re.I):
-                val = "'1998-01-01'"
-            elif re.search(r'(price|rate|cost|amount|balance|discount|tax|qty|quantity)', col_clean, re.I):
-                val = "1.0"
-            elif re.search(r'(name|title|desc|comment|code|state|city|street|address|zip|country|phone|status|type|mode|category|role|brand|clerk|segment|priority|message|note|text|str|tag|label|reason|gender)', col_clean, re.I):
-                val = "'A'"
-            else:
-                val = "1"
+            dtype = self._col_types.get(col_clean, "INT")
+            val = self._type_to_literal(dtype)
             new_inside = re.sub(r'\$\d+', val, inside)
             return f"{col} {op} ({new_inside})"
 
@@ -223,74 +208,14 @@ class PlaceholderResolver:
         )
 
         # -------------------------------------------------------------
-        # 10. Keyword-Based Column Comparisons (Fallbacks)
-        # -------------------------------------------------------------
-        # UUIDs
-        resolved = re.sub(
-            r'(\w*(?:uuid|guid|trace_id|session_id|txn_id|token|auth|key_hash)\w*)\s*([=><!]+)\s*\$(\d+)',
-            r"\1 \2 '00000000-0000-0000-0000-000000000000'",
-            resolved,
-            flags=re.IGNORECASE
-        )
-        # Network / IP
-        resolved = re.sub(
-            r'(\w*(?:ip|host|ip_address|cidr|netmask|mac|mac_address)\w*)\s*([=><!]+)\s*\$(\d+)',
-            r"\1 \2 '127.0.0.1'",
-            resolved,
-            flags=re.IGNORECASE
-        )
-        # Booleans
-        resolved = re.sub(
-            r'(\w*(?:is_|has_|active|enabled|valid|deleted|flag|archived|verified)\w*)\s*([=><!]+)\s*\$(\d+)',
-            r"\1 \2 TRUE",
-            resolved,
-            flags=re.IGNORECASE
-        )
-        # Email & URLs
-        resolved = re.sub(
-            r'(\w*(?:email|mail|url|uri|link|website|domain|path|endpoint)\w*)\s*([=><!]+)\s*\$(\d+)',
-            r"\1 \2 'a@example.com'",
-            resolved,
-            flags=re.IGNORECASE
-        )
-        # Strings / Text
-        resolved = re.sub(
-            r'(\w*(?:name|title|desc|comment|code|state|city|street|address|zip|country|phone|status|type|mode|category|role|brand|clerk|segment|priority|message|note|text|str|tag|label|reason|gender)\w*)\s*([=><!]+)\s*\$(\d+)',
-            r"\1 \2 'A'",
-            resolved,
-            flags=re.IGNORECASE
-        )
-        # Dates & Timestamps
-        resolved = re.sub(
-            r'(\w*(?:date|time|created_at|updated_at|deleted_at|timestamp|since|delivery_d|entry_d|shipdate|receiptdate|commitdate|birth|expire|due|at|period)\w*)\s*([=><!]+)\s*\$(\d+)',
-            r"\1 \2 '1998-01-01'",
-            resolved,
-            flags=re.IGNORECASE
-        )
-        # Floats / Numerics
-        resolved = re.sub(
-            r'(\w*(?:price|rate|cost|amount|balance|discount|tax|qty|quantity|fee|salary|weight|score|total|ratio|percent|pct|val|value|sum|avg)\w*)\s*([=><!]+)\s*\$(\d+)',
-            r"\1 \2 1.0",
-            resolved,
-            flags=re.IGNORECASE
-        )
-        # Integers / IDs
-        resolved = re.sub(
-            r'(\w*(?:id|key|num|number|count|size|days|cnt|seq|version|order|pos|rank|level|uid|gid|pid|code_id)\w*)\s*([=><!]+)\s*\$(\d+)',
-            r"\1 \2 1",
-            resolved,
-            flags=re.IGNORECASE
-        )
-
-        # -------------------------------------------------------------
-        # 11. Pagination & Limits
+        # 10. Pagination & Limits
         # -------------------------------------------------------------
         resolved = re.sub(r'\bLIMIT\s*\$(\d+)', "LIMIT 10", resolved, flags=re.IGNORECASE)
         resolved = re.sub(r'\bOFFSET\s*\$(\d+)', "OFFSET 0", resolved, flags=re.IGNORECASE)
         resolved = re.sub(r'\bFETCH\s+FIRST\s+\$(\d+)\s+ROWS\s+ONLY', "FETCH FIRST 10 ROWS ONLY", resolved, flags=re.IGNORECASE)
 
         # -------------------------------------------------------------
-        # 12. Safe Final Fallback
+        # 11. Safe Final Fallback
         # -------------------------------------------------------------
         resolved = re.sub(r'\$\d+', '1', resolved)
 
