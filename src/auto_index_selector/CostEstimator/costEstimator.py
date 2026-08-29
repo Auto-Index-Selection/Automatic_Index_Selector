@@ -400,21 +400,42 @@ def createCompositeHypoIndexes(conn, configuration):
             cur.execute("SELECT * FROM hypopg_create_index(%s);", (stmt,))
 
 
-def estimateWorkloadCostForConfig(conn, W, configuration, query_weights=None):
+def estimateWorkloadCostForConfig(conn, W, configuration, query_weights=None, write_penalties=None):
     """
-    Computes total hypothetical workload execution cost for a configuration.
-    If query_weights is provided ({query: call_frequency}), multiplies each query's
-    HypoPG cost by its observed frequency count.
+    Computes total hypothetical workload execution cost (Read Cost + Write Penalty) for a configuration.
+
+    Parameters
+    ----------
+    conn            : psycopg2 connection
+    W               : list of SQL queries
+    configuration   : iterable of (table, (col1, col2, ...)) indexes
+    query_weights   : dict, optional ({query: call_frequency})
+    write_penalties : callable or dict, optional (write penalty evaluator)
+
+    Returns
+    -------
+    float : Total Workload Cost = ReadCost + WriteCost
     """
     clearHypotheticalIndexes(conn)
     if configuration:
         createCompositeHypoIndexes(conn, configuration)
-    total = 0.0
+
+    read_cost = 0.0
     for query in W:
         weight = float(query_weights.get(query, 1.0)) if query_weights else 1.0
-        total += weight * getQueryCost(conn, query)
+        read_cost += weight * getQueryCost(conn, query)
     clearHypotheticalIndexes(conn)
-    return total
+
+    write_cost = 0.0
+    if write_penalties and configuration:
+        if callable(write_penalties):
+            for table, cols in configuration:
+                write_cost += write_penalties(table, tuple(cols))
+        elif isinstance(write_penalties, dict):
+            for table, cols in configuration:
+                write_cost += write_penalties.get((table, tuple(cols)), 0.0)
+
+    return read_cost + write_cost
 
 
 if __name__ == "__main__":

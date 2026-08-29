@@ -100,14 +100,13 @@ class ExtendAlgorithm:
     def _calculate_cost(self, I: IndexSet) -> float:
         key = frozenset((table, tuple(cols)) for table, cols in I)
         if key not in self.cost_cache:
-            read_cost = estimateWorkloadCostForConfig(
-                self.conn, self.W, key, query_weights=self.query_weights
+            self.cost_cache[key] = estimateWorkloadCostForConfig(
+                self.conn,
+                self.W,
+                key,
+                query_weights=self.query_weights,
+                write_penalties=self.write_penalties,
             )
-            write_cost = 0.0
-            if self.write_penalties:
-                for table, cols in key:
-                    write_cost += self.write_penalties.get((table, tuple(cols)), 0.0)
-            self.cost_cache[key] = read_cost + write_cost
         return self.cost_cache[key]
 
     def run(self, candidates: CandidatePool) -> Tuple[IndexSet, float, float]:

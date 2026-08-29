@@ -163,24 +163,21 @@ def main():
     if wp_enabled and wp_estimator and snap_before_writes:
         snap_after_writes = wp_estimator.snapshot()
 
-    # --- 3. Extract Read Workload (Delta Queries & Execution Weights) ---
+    # --- 3. Extract Read & Write Workload Deltas Immediately ---
     W, schema, query_weights = get_delta_workload(conn, snap_before_reads, snap_after_reads)
     print(f"Loaded Workload: {len(W)} active queries loaded (weighted by pg_stat_statements call counts).")
+
+    write_penalties = None
+    if wp_enabled and wp_estimator and snap_before_writes and snap_after_writes:
+        write_delta = wp_estimator.compute_delta(snap_before_writes, snap_after_writes)
+        write_penalties = wp_estimator.get_penalty_function(write_delta)
+        total_dml = sum(d.delta_inserts + d.delta_updates + d.delta_deletes for d in write_delta.values())
+        print(f"[WritePenalty] Initialized dynamic penalty evaluator across {len(write_delta)} tables ({total_dml} total DML modifications).")
 
     # --- 4. Candidate Generation ---
     candidateIndexes = cg_module.generateCandidateIndexes(W, schema)
     total_candidates = sum(len(v) for v in candidateIndexes.values()) if isinstance(candidateIndexes, dict) else len(candidateIndexes)
     print(f"Candidate Indexes Generated: {total_candidates} candidates across tables.")
-
-    # --- 5. Write Penalty Computation (Delta Writes) ---
-    write_penalties = {}
-    if wp_enabled and wp_estimator and snap_before_writes and snap_after_writes:
-        delta = wp_estimator.compute_delta(snap_before_writes, snap_after_writes)
-        write_penalties = wp_estimator.estimate_penalties(candidateIndexes, delta)
-        active_penalties = {k: v for k, v in write_penalties.items() if v > 0}
-        print(f"[WritePenalty] Computed penalties for {len(write_penalties)} candidate indexes ({len(active_penalties)} penalized)")
-        for idx_key, penalty in sorted(active_penalties.items(), key=lambda x: -x[1]):
-            print(f"  {idx_key[0]}.({','.join(idx_key[1])}): penalty = {penalty:.4f}")
 
     # --- 6. Configuration Selection ---
     cs_config = cfg.get("config_selection", {})

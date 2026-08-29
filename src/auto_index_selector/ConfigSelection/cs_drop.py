@@ -105,12 +105,11 @@ def dropHeuristic(conn, W, candidate_dict, storage_budget=float('inf'),
     def cost(config):
         key = frozenset(config)
         if key not in cost_cache:
-            read_cost = estimateWorkloadCostForConfig(conn, W, key, query_weights=query_weights)
-            write_cost = 0.0
-            if write_penalties:
-                for table, cols in key:
-                    write_cost += write_penalties.get((table, tuple(cols)), 0.0)
-            cost_cache[key] = read_cost + write_cost
+            cost_cache[key] = estimateWorkloadCostForConfig(
+                conn, W, key,
+                query_weights=query_weights,
+                write_penalties=write_penalties
+            )
         return cost_cache[key]
 
     def size(config):

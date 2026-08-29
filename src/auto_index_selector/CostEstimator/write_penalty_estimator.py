@@ -51,7 +51,7 @@ B-tree cost formulas:
 import math
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional, FrozenSet, Set
+from typing import Callable, Dict, List, Tuple, Optional, FrozenSet, Set, Union
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,9 @@ class TableDMLDelta:
     # Rolled-up / single-column update rows: {column_name: rows_updated_delta}
     # Fallback when column set stats are unavailable.
     column_update_rows: Dict[str, int] = field(default_factory=dict)
+
+
+TableDMLDeltaMap = Dict[str, TableDMLDelta]
 
 
 @dataclass
@@ -422,6 +425,37 @@ class WritePenaltyEstimator:
                 penalties[(table, cols_tuple)] = penalty
 
         return penalties
+
+    def estimate_index_penalty(
+        self,
+        table: str,
+        columns: Tuple[str, ...],
+        delta_map: Optional[TableDMLDeltaMap] = None,
+    ) -> float:
+        """Compute write penalty for a single arbitrary (table, columns) index on demand."""
+        if not delta_map:
+            return 0.0
+        delta = delta_map.get(table)
+        if not delta:
+            return 0.0
+        costs = self._get_planner_costs()
+        return self._compute_index_penalty(table, tuple(columns), delta, costs)
+
+    def get_penalty_function(
+        self,
+        delta_map: Optional[TableDMLDeltaMap] = None,
+    ) -> Callable[[str, Tuple[str, ...]], float]:
+        """Return a memoized callable (table, columns) -> float penalty for ANY candidate or morphed index."""
+        memo: Dict[Tuple[str, Tuple[str, ...]], float] = {}
+
+        def _penalty_fn(table: str, columns: Tuple[str, ...]) -> float:
+            cols_tuple = tuple(columns) if isinstance(columns, (list, tuple)) else (columns,)
+            key = (table, cols_tuple)
+            if key not in memo:
+                memo[key] = self.estimate_index_penalty(table, cols_tuple, delta_map)
+            return memo[key]
+
+        return _penalty_fn
 
     def _compute_index_penalty(
         self,

@@ -191,46 +191,7 @@ def flattenCandidateIndexes(candidate_dict):
     return flat
 
 
-def createCompositeHypoIndexes(conn, configuration):
-    """
-    Create HypoPG indexes for a configuration of (possibly multi-column)
-    candidate indexes.
 
-    configuration : iterable[(table, tuple(columns))]
-    """
-    with conn.cursor() as cur:
-        for table, cols in configuration:
-            col_list = ",".join(cols)
-            stmt = f"CREATE INDEX ON {table}({col_list})"
-            cur.execute("SELECT * FROM hypopg_create_index(%s);", (stmt,))
-    conn.commit()
-
-
-def estimateWorkloadCostForConfig(conn, W, configuration, query_weights=None):
-    """
-    Total workload cost for ONE configuration (sum over all queries).
-
-    configuration : iterable[(table, tuple(columns))]
-    W             : list[str] SQL queries
-    query_weights : dict, optional
-                    per-query execution count weights: {query_str: call_count}
-
-    Returns
-    -------
-    float -- sum of optimizer cost estimates across the workload
-    """
-    clearHypotheticalIndexes(conn)
-
-    if configuration:
-        createCompositeHypoIndexes(conn, configuration)
-
-    total = 0.0
-    for query in W:
-        weight = float(query_weights.get(query, 1.0)) if query_weights else 1.0
-        total += weight * getQueryCost(conn, query)
-
-    clearHypotheticalIndexes(conn)
-    return total
 
 
 def greedyMK(conn, W, candidate_dict, m, k, cost_cache=None, write_penalties=None, query_weights=None):
@@ -261,20 +222,14 @@ def greedyMK(conn, W, candidate_dict, m, k, cost_cache=None, write_penalties=Non
 
     candidate_indexes = flattenCandidateIndexes(candidate_dict)
 
-    # Obtain write penalty map via standard CostEstimator function
-    penalties = estimateWorkloadCostUpdate(conn, W, candidate_dict, write_penalties=write_penalties)
-
-    def config_write_penalty(config):
-        if not penalties:
-            return 0.0
-        return sum(penalties.get(idx, 0.0) for idx in config)
-
     def cost(config):
         key = frozenset(config)
         if key not in cost_cache:
-            read_cost = estimateWorkloadCostForConfig(conn, W, key, query_weights=query_weights)
-            write_cost = config_write_penalty(key)
-            cost_cache[key] = read_cost + write_cost
+            cost_cache[key] = estimateWorkloadCostForConfig(
+                conn, W, key,
+                query_weights=query_weights,
+                write_penalties=write_penalties
+            )
         return cost_cache[key]
 
     m_eff = min(m, k, len(candidate_indexes))
