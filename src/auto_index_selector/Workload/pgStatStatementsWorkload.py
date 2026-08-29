@@ -382,12 +382,17 @@ def get_delta_workload(
     # Extract all queries executed with positive call deltas during the window
     for qid, after_entry in snap_after.entries.items():
         before_entry = snap_before.entries.get(qid)
-        delta_calls = after_entry.calls - (before_entry.calls if before_entry else 0)
+        if before_entry is None or after_entry.calls < before_entry.calls:
+            delta_calls = after_entry.calls
+        else:
+            delta_calls = after_entry.calls - before_entry.calls
 
         if delta_calls > 0:
             resolved = resolver.resolve(after_entry.query)
-            queries.append(resolved)
-            query_weights[resolved] = float(delta_calls)
+            if resolved not in query_weights:
+                queries.append(resolved)
+                query_weights[resolved] = 0.0
+            query_weights[resolved] += float(delta_calls)
 
     if queries:
         logger.info("[pg_stat_statements] Extracted %d active queries from observation window delta", len(queries))
