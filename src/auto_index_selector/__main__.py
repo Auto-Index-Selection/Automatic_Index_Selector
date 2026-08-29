@@ -166,18 +166,41 @@ def main():
     # --- 3. Extract Read & Write Workload Deltas Immediately ---
     W, schema, query_weights = get_delta_workload(conn, snap_before_reads, snap_after_reads)
     print(f"Loaded Workload: {len(W)} active queries loaded (weighted by pg_stat_statements call counts).")
+    if W:
+        print("\n--- [Workload] Parsed & Resolved Active Queries ---")
+        for i, q in enumerate(W, 1):
+            calls = int(query_weights.get(q, 1.0))
+            print(f"  [{i}] (calls={calls}): {q}")
 
     write_penalties = None
     if wp_enabled and wp_estimator and snap_before_writes and snap_after_writes:
         write_delta = wp_estimator.compute_delta(snap_before_writes, snap_after_writes)
         write_penalties = wp_estimator.get_penalty_function(write_delta)
         total_dml = sum(d.delta_inserts + d.delta_updates + d.delta_deletes for d in write_delta.values())
-        print(f"[WritePenalty] Initialized dynamic penalty evaluator across {len(write_delta)} tables ({total_dml} total DML modifications).")
+        print(f"\n[WritePenalty] Initialized dynamic penalty evaluator across {len(write_delta)} tables ({total_dml} total DML modifications).")
 
     # --- 4. Candidate Generation ---
     candidateIndexes = cg_module.generateCandidateIndexes(W, schema)
     total_candidates = sum(len(v) for v in candidateIndexes.values()) if isinstance(candidateIndexes, dict) else len(candidateIndexes)
     print(f"Candidate Indexes Generated: {total_candidates} candidates across tables.")
+
+    # --- Log Candidate Write Penalties ---
+    if write_penalties and candidateIndexes:
+        print("\n--- [Write Penalty] Candidate Indexes & Calculated Penalties ---")
+        all_candidates = []
+        if isinstance(candidateIndexes, dict):
+            for t, col_lists in candidateIndexes.items():
+                for cols in col_lists:
+                    all_candidates.append((t, tuple(cols)))
+        elif isinstance(candidateIndexes, (list, set, frozenset)):
+            for item in candidateIndexes:
+                if isinstance(item, tuple) and len(item) == 2:
+                    t, cols = item
+                    all_candidates.append((t, tuple(cols) if isinstance(cols, (list, tuple)) else (cols,)))
+
+        for table, cols in sorted(all_candidates):
+            pen = write_penalties(table, cols) if callable(write_penalties) else write_penalties.get((table, cols), 0.0)
+            print(f"  {table}({', '.join(cols)}): write_penalty = {pen:.4f}")
 
     # --- 6. Configuration Selection ---
     cs_config = cfg.get("config_selection", {})
@@ -216,7 +239,8 @@ def main():
 
     print("\nSelected Index Configuration:")
     for table, cols in selected:
-        print(f"  CREATE INDEX ON {table}({','.join(cols)});")
+        pen = write_penalties(table, tuple(cols)) if write_penalties and callable(write_penalties) else 0.0
+        print(f"  CREATE INDEX ON {table}({', '.join(cols)});  [write_penalty = {pen:.4f}]")
 
 
     # todo
