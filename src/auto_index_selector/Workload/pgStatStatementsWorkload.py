@@ -392,12 +392,7 @@ def get_delta_workload(
     if queries:
         logger.info("[pg_stat_statements] Extracted %d active queries from observation window delta", len(queries))
     else:
-        # Fallback: if no new calls occurred during window, extract cumulative queries from after-snapshot
-        for entry in snap_after.entries.values():
-            resolved = resolver.resolve(entry.query)
-            queries.append(resolved)
-            query_weights[resolved] = float(max(1, entry.calls))
-        logger.info("[pg_stat_statements] Window was quiet; loaded %d cumulative baseline queries", len(queries))
+        logger.info("[pg_stat_statements] No queries executed during observation window (0 delta queries)")
 
     return queries, schema, query_weights
 
