@@ -149,8 +149,12 @@ class PlaceholderResolver:
         # -------------------------------------------------------------
         # 6. Schema & Catalog Function Calls: func_name($1, $2, ...)
         # -------------------------------------------------------------
+        _SQL_KEYWORDS = {"in", "exists", "any", "all", "select", "from", "where", "and", "or", "values", "not", "case", "when", "then", "else", "end", "with", "having", "group", "order"}
+
         def _repl_func(m):
             func_name, inside = m.group(1), m.group(2)
+            if func_name.lower() in _SQL_KEYWORDS or re.search(r'\bSELECT\b', inside, re.I):
+                return m.group(0)
             arg_types = self._func_types.get(func_name.lower())
             if arg_types:
                 parts = [p.strip() for p in inside.split(',')]
@@ -196,10 +200,13 @@ class PlaceholderResolver:
         resolved = re.sub(r'(!~|!~\*|~|~\*)\s*\$(\d+)', r"\1 '^A'", resolved, flags=re.IGNORECASE)
 
         # -------------------------------------------------------------
-        # 9. Schema-Driven Multi-item IN / NOT IN lists: (table.)col IN ($1, $2, ...)
+        # 9. Schema-Driven Multi-item IN / NOT IN lists: (table.)col IN ($1, $2, ...) (excluding subqueries)
         # -------------------------------------------------------------
         def _repl_in(m):
             col, op, inside = m.group(1), m.group(2), m.group(3)
+            # If inside parentheses is a subquery (contains SELECT), leave it to inner column resolution
+            if re.search(r'\bSELECT\b', inside, re.I):
+                return m.group(0)
             col_clean = col.split(".")[-1].lower()
             dtype = self._col_types.get(col_clean, "INT")
             val = self._type_to_literal(dtype)
