@@ -117,9 +117,7 @@ TableDMLDeltaMap = Dict[str, TableDMLDelta]
 @dataclass
 class Snapshot:
     """Combined point-in-time snapshot of extension stats + pg_stat_user_tables."""
-    # Per-column UPDATE stats from advisor_get_update_stats()
-    column_stats: List[ColumnUpdateStats]
-    # Per-column-SET UPDATE stats from advisor_get_column_set_stats()
+    # Per-column-SET UPDATE stats from advisor_get_column_set_stats() (covers both single and multi-column)
     column_set_stats: List[ColumnSetUpdateStats]
     # Per-table DML counters from pg_stat_user_tables:
     #   {table_name: (n_tup_ins, n_tup_upd, n_tup_del)}
@@ -137,27 +135,10 @@ class WritePenaltyEstimator:
     All costs are expressed in PostgreSQL planner cost units (same as
     EXPLAIN output), ensuring direct comparability with read-side
     HypoPG benefit estimates.
-
-    Example::
-
-        estimator = WritePenaltyEstimator(conn, write_scale=1.0)
-        estimator.ensure_extension()
-        snap_before = estimator.snapshot()
-        # ... run workload ...
-        snap_after = estimator.snapshot()
-        delta = estimator.compute_delta(snap_before, snap_after)
-        penalties = estimator.estimate_penalties(candidate_indexes, delta)
     """
 
     def __init__(self, conn, write_scale: float = 1.0):
-        """Initialise the estimator.
-
-        Args:
-            conn:        psycopg2 connection object.
-            write_scale: Multiplier for observed write counts
-                         (analytical scaling, e.g. 100.0 to project
-                         100× OLTP write volume).
-        """
+        """Initialise the estimator."""
         self._conn = conn
         self._write_scale = write_scale
         self._planner_costs: Optional[PlannerCosts] = None
@@ -170,48 +151,16 @@ class WritePenaltyEstimator:
     # ------------------------------------------------------------------
 
     def ensure_extension(self):
-        """Verify that the advisor_write_stats extension and functions exist.
-
-        1. Creates extension if not yet created.
-        2. Registers advisor_get_column_set_stats() if missing.
-        Raises RuntimeError if the underlying shared library is not loaded
-        via shared_preload_libraries.
-        """
+        """Verify that the advisor_write_stats extension and functions exist."""
         with self._conn.cursor() as cur:
             try:
-                # 1. Check if extension or function is available
                 cur.execute(
-                    "SELECT 1 FROM pg_proc WHERE proname = 'advisor_get_update_stats'"
+                    "SELECT 1 FROM pg_proc WHERE proname = 'advisor_get_column_set_stats'"
                 )
                 if cur.fetchone() is None:
                     cur.execute("CREATE EXTENSION IF NOT EXISTS advisor_write_stats")
                     self._conn.commit()
                     logger.info("Created advisor_write_stats extension")
-
-                # 2. Ensure advisor_get_column_set_stats is registered
-                cur.execute(
-                    "SELECT 1 FROM pg_proc WHERE proname = 'advisor_get_column_set_stats'"
-                )
-                if cur.fetchone() is None:
-                    try:
-                        cur.execute("""
-                            CREATE OR REPLACE FUNCTION advisor_get_column_set_stats(
-                                OUT relation_name text,
-                                OUT column_set text[],
-                                OUT update_query_count bigint,
-                                OUT rows_updated bigint
-                            )
-                            RETURNS SETOF record
-                            AS '$libdir/advisor_write_stats', 'advisor_get_column_set_stats'
-                            LANGUAGE C STRICT VOLATILE;
-                        """)
-                        self._conn.commit()
-                        logger.info("Registered advisor_get_column_set_stats function")
-                    except Exception as func_err:
-                        logger.warning(
-                            "Could not register advisor_get_column_set_stats: %s", func_err
-                        )
-                        self._conn.rollback()
 
                 logger.info("advisor_write_stats extension verified successfully")
             except Exception as e:
@@ -228,48 +177,16 @@ class WritePenaltyEstimator:
     # ------------------------------------------------------------------
 
     def snapshot(self) -> Snapshot:
-        """Take a point-in-time snapshot of write statistics.
-
-        Captures:
-          1. Per-column UPDATE stats from advisor_get_update_stats()
-          2. Per-column-SET UPDATE stats from advisor_get_column_set_stats()
-          3. Per-table DML counters from pg_stat_user_tables
-
-        Returns:
-            A Snapshot combining all sources.
-        """
-        column_stats = self._snapshot_extension_column_stats()
+        """Take a point-in-time snapshot of write statistics via single-read."""
         column_set_stats = self._snapshot_extension_column_set_stats()
         table_stats = self._snapshot_table_stats()
         return Snapshot(
-            column_stats=column_stats,
             column_set_stats=column_set_stats,
             table_stats=table_stats,
         )
 
-    def _snapshot_extension_column_stats(self) -> List[ColumnUpdateStats]:
-        """Query advisor_get_update_stats() for per-column UPDATE tracking."""
-        results: List[ColumnUpdateStats] = []
-        with self._conn.cursor() as cur:
-            try:
-                cur.execute("SELECT * FROM advisor_get_update_stats()")
-                for row in cur.fetchall():
-                    rel_name = row[0]
-                    if rel_name and '.' in rel_name:
-                        rel_name = rel_name.split('.')[-1]
-                    results.append(ColumnUpdateStats(
-                        relation_name=rel_name,
-                        column_name=row[1],
-                        update_query_count=int(row[2]),
-                        rows_updated=int(row[3]),
-                    ))
-            except Exception as e:
-                logger.warning("Failed to query advisor_get_update_stats: %s", e)
-                self._conn.rollback()
-        return results
-
     def _snapshot_extension_column_set_stats(self) -> List[ColumnSetUpdateStats]:
-        """Query advisor_get_column_set_stats() for multi-column SET update tracking."""
+        """Query advisor_get_column_set_stats() for single and multi-column SET update tracking."""
         results: List[ColumnSetUpdateStats] = []
         with self._conn.cursor() as cur:
             try:
@@ -278,7 +195,6 @@ class WritePenaltyEstimator:
                     rel_name = row[0]
                     if rel_name and '.' in rel_name:
                         rel_name = rel_name.split('.')[-1]
-                    # Convert postgres array to tuple of strings
                     raw_cols = row[1]
                     if isinstance(raw_cols, list):
                         col_set = tuple(raw_cols)
@@ -294,7 +210,7 @@ class WritePenaltyEstimator:
                         rows_updated=int(row[3]),
                     ))
             except Exception as e:
-                logger.debug("advisor_get_column_set_stats not available or failed: %s", e)
+                logger.warning("advisor_get_column_set_stats failed: %s", e)
                 self._conn.rollback()
         return results
 
@@ -320,20 +236,7 @@ class WritePenaltyEstimator:
     def compute_delta(
         self, before: Snapshot, after: Snapshot
     ) -> Dict[str, TableDMLDelta]:
-        """Compute the DML activity delta between two snapshots.
-
-        Combines:
-          - INSERT / UPDATE / DELETE row counts from pg_stat_user_tables
-          - Per-column-SET UPDATE row counts from advisor_get_column_set_stats()
-          - Per-column UPDATE row counts from advisor_get_update_stats()
-
-        Args:
-            before: Snapshot taken before the workload.
-            after:  Snapshot taken after the workload.
-
-        Returns:
-            dict mapping table_name → TableDMLDelta.
-        """
+        """Compute the DML activity delta between two snapshots."""
         deltas: Dict[str, TableDMLDelta] = {}
 
         # 1) Compute INSERT / UPDATE / DELETE deltas from pg_stat_user_tables
@@ -349,7 +252,7 @@ class WritePenaltyEstimator:
             )
             deltas[table_name] = delta
 
-        # 2) Compute per-column-SET UPDATE deltas
+        # 2) Compute per-column-SET UPDATE deltas (handles both single & multi-column updates)
         before_set_lookup: Dict[Tuple[str, FrozenSet[str]], int] = {}
         for s in before.column_set_stats:
             before_set_lookup[(s.relation_name, frozenset(s.column_set))] = s.rows_updated
@@ -366,23 +269,10 @@ class WritePenaltyEstimator:
                         table_name=s.relation_name
                     )
                 deltas[s.relation_name].column_set_update_rows[set_key] = row_delta
-
-        # 3) Compute per-column UPDATE deltas (as single-column fallback and rollup)
-        before_col_lookup: Dict[Tuple[str, str], int] = {}
-        for cs in before.column_stats:
-            before_col_lookup[(cs.relation_name, cs.column_name)] = cs.rows_updated
-
-        for cs in after.column_stats:
-            lookup_key = (cs.relation_name, cs.column_name)
-            rows_before = before_col_lookup.get(lookup_key, 0)
-            row_delta = max(0, cs.rows_updated - rows_before)
-
-            if row_delta > 0:
-                if cs.relation_name not in deltas:
-                    deltas[cs.relation_name] = TableDMLDelta(
-                        table_name=cs.relation_name
-                    )
-                deltas[cs.relation_name].column_update_rows[cs.column_name] = row_delta
+                # Unroll into column_update_rows for single-column lookup
+                for col in s.column_set:
+                    prev_val = deltas[s.relation_name].column_update_rows.get(col, 0)
+                    deltas[s.relation_name].column_update_rows[col] = prev_val + row_delta
 
         return deltas
 
