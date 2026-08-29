@@ -23,18 +23,6 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Fallback default schema for standard TPC-H tables
-_DEFAULT_TPCH_SCHEMA = {
-    "region": {"r_regionkey": "INT", "r_name": "VARCHAR", "r_comment": "VARCHAR"},
-    "nation": {"n_nationkey": "INT", "n_name": "VARCHAR", "n_regionkey": "INT", "n_comment": "VARCHAR"},
-    "part": {"p_partkey": "INT", "p_name": "VARCHAR", "p_mfgr": "VARCHAR", "p_brand": "VARCHAR", "p_type": "VARCHAR", "p_size": "INT", "p_container": "VARCHAR", "p_retailprice": "DOUBLE", "p_comment": "VARCHAR"},
-    "supplier": {"s_suppkey": "INT", "s_name": "VARCHAR", "s_address": "VARCHAR", "s_nationkey": "INT", "s_phone": "VARCHAR", "s_acctbal": "DOUBLE", "s_comment": "VARCHAR"},
-    "partsupp": {"ps_partkey": "INT", "ps_suppkey": "INT", "ps_availqty": "INT", "ps_supplycost": "DOUBLE", "ps_comment": "VARCHAR"},
-    "customer": {"c_custkey": "INT", "c_name": "VARCHAR", "c_address": "VARCHAR", "c_nationkey": "INT", "c_phone": "VARCHAR", "c_acctbal": "DOUBLE", "c_mktsegment": "VARCHAR", "c_comment": "VARCHAR"},
-    "orders": {"o_orderkey": "INT", "o_custkey": "INT", "o_orderstatus": "VARCHAR", "o_totalprice": "DOUBLE", "o_orderdate": "DATE", "o_orderpriority": "VARCHAR", "o_clerk": "VARCHAR", "o_shippriority": "INT", "o_comment": "VARCHAR"},
-    "lineitem": {"l_orderkey": "INT", "l_partkey": "INT", "l_suppkey": "INT", "l_linenumber": "INT", "l_quantity": "DOUBLE", "l_extendedprice": "DOUBLE", "l_discount": "DOUBLE", "l_tax": "DOUBLE", "l_returnflag": "VARCHAR", "l_linestatus": "VARCHAR", "l_shipdate": "DATE", "l_commitdate": "DATE", "l_receiptdate": "DATE", "l_shipinstruct": "VARCHAR", "l_shipmode": "VARCHAR", "l_comment": "VARCHAR"},
-}
-
 
 @dataclass
 class PgStatEntry:
@@ -56,7 +44,7 @@ class PlaceholderResolver:
     """Substitutes $1, $2, ... placeholders in pg_stat_statements queries with typed dummy literals."""
 
     def __init__(self, schema: Optional[Dict[str, Dict[str, str]]] = None) -> None:
-        self._schema = schema or _DEFAULT_TPCH_SCHEMA
+        self._schema = schema or {}
 
     def resolve(self, query: str) -> str:
         """Replace all $N parameters with valid PostgreSQL literals."""
@@ -148,6 +136,9 @@ class PlaceholderResolver:
 def fetch_live_schema(conn) -> Dict[str, Dict[str, str]]:
     """Fetch table and column schema mapping from PostgreSQL information_schema."""
     schema: Dict[str, Dict[str, str]] = {}
+    if conn is None:
+        return schema
+
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -159,12 +150,12 @@ def fetch_live_schema(conn) -> Dict[str, Dict[str, str]]:
             for table_name, column_name, data_type in cur.fetchall():
                 schema.setdefault(table_name, {})[column_name] = data_type.upper()
     except Exception as e:
-        logger.warning("Could not fetch information_schema: %s. Using default schema.", e)
+        logger.warning("Could not fetch information_schema: %s", e)
         if conn:
             conn.rollback()
-        return _DEFAULT_TPCH_SCHEMA
+        return {}
 
-    return schema if schema else _DEFAULT_TPCH_SCHEMA
+    return schema
 
 
 def take_snapshot(conn) -> PgStatSnapshot:
@@ -249,8 +240,8 @@ def get_delta_workload(
 def getWorkload(conn=None) -> Tuple[List[str], Dict[str, Dict[str, str]], Dict[str, float]]:
     """Single-call fallback interface matching the standard Workload module signature."""
     if conn is None:
-        logger.warning("No live connection passed to pgStatStatementsWorkload. Returning default TPC-H schema.")
-        return [], _DEFAULT_TPCH_SCHEMA, {}
+        logger.warning("No live connection passed to pgStatStatementsWorkload.")
+        return [], {}, {}
 
     snap = take_snapshot(conn)
     return get_delta_workload(conn, PgStatSnapshot(), snap)
