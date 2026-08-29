@@ -435,7 +435,11 @@ def estimateWorkloadCostForConfig(conn, W, configuration, query_weights=None, wr
             for table, cols in configuration:
                 write_cost += write_penalties.get((table, tuple(cols)), 0.0)
 
-    return read_cost + write_cost
+    total_cost = read_cost + write_cost
+    config_desc = ", ".join(f"{t}({','.join(c)})" for t, c in configuration) if configuration else "None (Baseline)"
+    print(f"  [Cost Evaluation] Config: [{config_desc}] | Read Cost: {read_cost:.2f} | Write Penalty: {write_cost:.2f} | Total Cost: {total_cost:.2f}")
+
+    return total_cost
 
 
 if __name__ == "__main__":

@@ -392,6 +392,7 @@ def get_delta_workload(
             if resolved not in query_weights:
                 queries.append(resolved)
                 query_weights[resolved] = 0.0
+                print(f"  [Parsed Query] (calls={int(delta_calls)}): {resolved}")
             query_weights[resolved] += float(delta_calls)
 
     if queries:
