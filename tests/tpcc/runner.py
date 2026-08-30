@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Set, Tuple
 import psycopg2
 
 from auto_index_selector.__main__ import run_auto_index_selector
-from .workload import load_tpcc_queries, run_tpcc_traffic, TPCCDMLGenerator
+from .workload import load_tpcc_queries, run_tpcc_traffic
 
 logger = logging.getLogger(__name__)
 
