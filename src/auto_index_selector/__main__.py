@@ -15,6 +15,7 @@ pointing config.toml at its module name (no ".py" extension).
 import sys
 import importlib
 from pathlib import Path
+from typing import Optional, Tuple, List, Dict, Any
 try:
     from pyprojroot import here
 except ImportError:
@@ -29,40 +30,41 @@ import os
 # for older interpreters.
 try:
     import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    import tomli as tomllib
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError as e:
+        raise ImportError(
+            "tomllib is not available in stdlib (requires Python 3.11+), "
+            "and the 'tomli' package is not installed. "
+            "Install it with: pip install tomli"
+        ) from e
 
-from auto_index_selector.Workload.pgStatStatementsWorkload import (
-    take_snapshot,
-    get_delta_workload,
-)
+from auto_index_selector.Workload.pgStatStatementsWorkload import take_snapshot, get_delta_workload
 
-# Maps each config.toml section -> the Python package it should import from.
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.toml"
+
 SECTION_TO_PACKAGE = {
     "candidate_generation": "auto_index_selector.CandidateGeneration",
-    "config_selection": "auto_index_selector.ConfigSelection",
+    "config_selection":     "auto_index_selector.ConfigSelection",
 }
 
-def _find_config_path() -> Path:
-    candidates = [
+
+def load_config(config_path: Optional[Path] = None) -> dict:
+    """Load and parse config.toml from standard search paths."""
+    candidates = []
+    if config_path:
+        candidates.append(Path(config_path))
+    candidates.extend([
         Path.cwd() / "config.toml",
-        Path(__file__).resolve().parent.parent.parent.parent / "config.toml",
-        Path(str(here() / "Automatic_Index_Selector" / "config.toml")),
-        Path(str(here() / "config.toml")),
-    ]
+        Path(__file__).resolve().parent.parent.parent / "config.toml",
+        Path(__file__).resolve().parent / "config.toml",
+    ])
     for p in candidates:
         if p.exists():
-            return p
-    return candidates[0]
-
-DEFAULT_CONFIG_PATH = _find_config_path()
-
-def load_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict:
-    """Load and parse config.toml."""
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-    with open(config_path, "rb") as f:
-        return tomllib.load(f)
+            with open(p, "rb") as f:
+                return tomllib.load(f)
+    raise FileNotFoundError(f"Config file not found in any search path: {[str(c) for c in candidates]}")
 
 
 def import_selected_module(section: str, config: dict):
@@ -108,128 +110,202 @@ def load_pipeline(config_path: Path = DEFAULT_CONFIG_PATH):
 
     return pipeline
 
+
 TEST = False
 
-def main():
+
+def _normalise_candidates(candidates):
+    """Ensure candidate dictionary format is {table: [('col1',), ('col1', 'col2')]}."""
+    if not isinstance(candidates, dict):
+        return candidates
+    normalised = {}
+    for table, index_list in candidates.items():
+        norm_list = []
+        for item in index_list:
+            if isinstance(item, tuple):
+                norm_list.append(item)
+            elif isinstance(item, list):
+                norm_list.append(tuple(item))
+            elif isinstance(item, str):
+                norm_list.append((item,))
+            else:
+                norm_list.append(tuple(item))
+        normalised[table] = norm_list
+    return normalised
+
+
+def run_auto_index_selector(
+    conn=None,
+    config_override: dict = None,
+    verbose: bool = True,
+):
+    """
+    Runs the full end-to-end index selection pipeline:
+    1. Snapshot before (Reads & Writes)
+    2. Observation window (Sleep / wait for traffic)
+    3. Snapshot after & compute deltas
+    4. Candidate generation
+    5. Write penalty evaluation
+    6. Configuration selection
+
+    Returns
+    -------
+    tuple : (selected_config, W, query_weights, write_penalties)
+    """
     cfg = load_config()
-    pipeline = load_pipeline()
+    if config_override:
+        for k, v in config_override.items():
+            if isinstance(v, dict) and k in cfg and isinstance(cfg[k], dict):
+                cfg[k].update(v)
+            else:
+                cfg[k] = v
 
-    cg_module = pipeline["candidate_generation"]
-    cs_module = pipeline["config_selection"]
+    cg_module = import_selected_module("candidate_generation", cfg)
+    cs_module = import_selected_module("config_selection", cfg)
 
-    print(f"[CandidateGeneration] using module: {cg_module.__name__}")
-    print(f"[ConfigSelection]     using module: {cs_module.__name__}")
-    print(f"[Workload]            using pg_stat_statements (live delta workload)")
+    if verbose:
+        print(f"[CandidateGeneration] using module: {cg_module.__name__}")
+        print(f"[ConfigSelection]     using module: {cs_module.__name__}")
+        print(f"[Workload]            using pg_stat_statements (live delta workload)")
 
     # connection setup
-    load_dotenv()
-    conn = psycopg2.connect(
-        dbname=os.getenv("DB_NAME"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        host=os.getenv("DB_HOST"),
-        port=os.getenv("DB_PORT")
-    )
-    print("Connection established successfully!")
+    close_conn_on_exit = False
+    if conn is None:
+        load_dotenv()
+        conn = psycopg2.connect(
+            dbname=os.getenv("DB_NAME"),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            host=os.getenv("DB_HOST"),
+            port=os.getenv("DB_PORT")
+        )
+        close_conn_on_exit = True
+        if verbose:
+            print("Connection established successfully!")
 
-    # --- 1. Snapshot Before Window (Writes & Reads) ---
-    wp_config = cfg.get("write_penalty", {})
-    wp_enabled = wp_config.get("enabled", False)
-    wp_estimator = None
-    snap_before_writes = None
+    try:
+        # --- 1. Snapshot Before Window (Writes & Reads) ---
+        wp_config = cfg.get("write_penalty", {})
+        wp_enabled = wp_config.get("enabled", False)
+        wp_estimator = None
+        snap_before_writes = None
 
-    if wp_enabled:
-        from auto_index_selector.CostEstimator.write_penalty_estimator import WritePenaltyEstimator
-        write_scale = float(wp_config.get("write_scale", 1.0))
-        wp_estimator = WritePenaltyEstimator(conn, write_scale=write_scale)
-        wp_estimator.ensure_extension()
-        snap_before_writes = wp_estimator.snapshot()
-        print(f"[WritePenalty] Captured write before-snapshot (scale={write_scale})")
+        if wp_enabled:
+            from auto_index_selector.CostEstimator.write_penalty_estimator import WritePenaltyEstimator
+            write_scale = float(wp_config.get("write_scale", 1.0))
+            wp_estimator = WritePenaltyEstimator(conn, write_scale=write_scale)
+            wp_estimator.ensure_extension()
+            snap_before_writes = wp_estimator.snapshot()
+            if verbose:
+                print(f"[WritePenalty] Captured write before-snapshot (scale={write_scale})")
 
-    snap_before_reads = take_snapshot(conn)
-    print(f"[Workload] Captured pg_stat_statements before-snapshot ({len(snap_before_reads.entries)} queries tracked)")
+        snap_before_reads = take_snapshot(conn)
+        if verbose:
+            print(f"[Workload] Captured pg_stat_statements before-snapshot ({len(snap_before_reads.entries)} queries tracked)")
 
-    # --- 2. Observation Window (Wait for background application/simulator traffic) ---
-    duration = int(wp_config.get("window_duration_seconds", 0))
-    if duration > 0:
-        import time
-        print(f"[Observer] Monitoring database for {duration}s observation window...")
-        time.sleep(duration)
+        # --- 2. Observation Window (Wait for background application/simulator traffic) ---
+        duration = int(wp_config.get("window_duration_seconds", 0))
+        if duration > 0:
+            import time
+            if verbose:
+                print(f"[Observer] Monitoring database for {duration}s observation window...")
+            time.sleep(duration)
 
-    # --- Capture both after-snapshots immediately when observation window ends ---
-    snap_after_reads = take_snapshot(conn)
+        # --- Capture both after-snapshots immediately when observation window ends ---
+        snap_after_reads = take_snapshot(conn)
 
-    snap_after_writes = None
-    if wp_enabled and wp_estimator and snap_before_writes:
-        snap_after_writes = wp_estimator.snapshot()
+        snap_after_writes = None
+        if wp_enabled and wp_estimator and snap_before_writes:
+            snap_after_writes = wp_estimator.snapshot()
 
-    # --- 3. Extract Read & Write Workload Deltas Immediately ---
-    W, schema, query_weights = get_delta_workload(conn, snap_before_reads, snap_after_reads)
-    print(f"Loaded Workload: {len(W)} active queries loaded (weighted by pg_stat_statements call counts).")
-    if W:
-        print("\n--- [Workload] Parsed & Resolved Active Queries ---")
-        for i, q in enumerate(W, 1):
-            calls = int(query_weights.get(q, 1.0))
-            print(f"  [{i}] (calls={calls}): {q}")
+        # --- 3. Extract Read & Write Workload Deltas Immediately ---
+        W, schema, query_weights = get_delta_workload(conn, snap_before_reads, snap_after_reads)
+        if not W and duration == 0:
+            from auto_index_selector.Workload.pgStatStatementsWorkload import getWorkload
+            W, schema, query_weights = getWorkload(conn)
 
-    write_penalties = None
-    if wp_enabled and wp_estimator and snap_before_writes and snap_after_writes:
-        write_delta = wp_estimator.compute_delta(snap_before_writes, snap_after_writes)
-        write_penalties = wp_estimator.get_penalty_function(write_delta)
-        total_dml = sum(d.delta_inserts + d.delta_updates + d.delta_deletes for d in write_delta.values())
-        print(f"\n[WritePenalty] Initialized dynamic penalty evaluator across {len(write_delta)} tables ({total_dml} total DML modifications).")
+        if verbose:
+            print(f"Loaded Workload: {len(W)} active queries loaded (weighted by pg_stat_statements call counts).")
+            if W:
+                print("\n--- [Workload] Parsed & Resolved Active Queries ---")
+                for i, q in enumerate(W, 1):
+                    calls = int(query_weights.get(q, 1.0))
+                    print(f"  [{i}] (calls={calls}): {q}")
 
-    # --- 4. Candidate Generation ---
-    candidateIndexes = cg_module.generateCandidateIndexes(W, schema)
-    total_candidates = sum(len(v) for v in candidateIndexes.values()) if isinstance(candidateIndexes, dict) else len(candidateIndexes)
-    print(f"Candidate Indexes Generated: {total_candidates} candidates across tables.")
+        write_penalties = None
+        if wp_enabled and wp_estimator and snap_before_writes and snap_after_writes:
+            write_delta = wp_estimator.compute_delta(snap_before_writes, snap_after_writes)
+            write_penalties = wp_estimator.get_penalty_function(write_delta)
+            total_dml = sum(d.delta_inserts + d.delta_updates + d.delta_deletes for d in write_delta.values())
+            if verbose:
+                print(f"\n[WritePenalty] Initialized dynamic penalty evaluator across {len(write_delta)} tables ({total_dml} total DML modifications).")
 
-    # --- Log Candidate Write Penalties ---
-    if write_penalties and candidateIndexes:
-        print("\n--- [Write Penalty] Candidate Indexes & Calculated Penalties ---")
-        all_candidates = []
-        if isinstance(candidateIndexes, dict):
-            for t, col_lists in candidateIndexes.items():
-                for cols in col_lists:
-                    all_candidates.append((t, tuple(cols)))
-        elif isinstance(candidateIndexes, (list, set, frozenset)):
-            for item in candidateIndexes:
-                if isinstance(item, tuple) and len(item) == 2:
-                    t, cols = item
-                    all_candidates.append((t, tuple(cols) if isinstance(cols, (list, tuple)) else (cols,)))
+        # --- 4. Candidate Generation ---
+        raw_cands = cg_module.generateCandidateIndexes(W, schema)
+        candidateIndexes = _normalise_candidates(raw_cands)
+        total_candidates = sum(len(v) for v in candidateIndexes.values()) if isinstance(candidateIndexes, dict) else len(candidateIndexes)
+        if verbose:
+            print(f"Candidate Indexes Generated: {total_candidates} candidates across tables.")
 
-        for table, cols in sorted(all_candidates):
-            pen = write_penalties(table, cols) if callable(write_penalties) else write_penalties.get((table, cols), 0.0)
-            print(f"  {table}({', '.join(cols)}): write_penalty = {pen:.4f}")
+        # --- Log Candidate Write Penalties ---
+        if write_penalties and candidateIndexes and verbose:
+            print("\n--- [Write Penalty] Candidate Indexes & Calculated Penalties ---")
+            all_candidates = []
+            if isinstance(candidateIndexes, dict):
+                for t, col_lists in candidateIndexes.items():
+                    for cols in col_lists:
+                        all_candidates.append((t, tuple(cols)))
+            elif isinstance(candidateIndexes, (list, set, frozenset)):
+                for item in candidateIndexes:
+                    if isinstance(item, tuple) and len(item) == 2:
+                        t, cols = item
+                        all_candidates.append((t, tuple(cols) if isinstance(cols, (list, tuple)) else (cols,)))
 
-    # --- 6. Configuration Selection ---
-    cs_config = cfg.get("config_selection", {})
-    m_val = int(cs_config.get("m", 2))
-    k_val = int(cs_config.get("k", 10))
-    storage_budget = cs_config.get("storage_budget", float("inf"))
-    if isinstance(storage_budget, str) and storage_budget.lower() != "inf":
-        storage_budget = float(storage_budget)
+            for table, cols in sorted(all_candidates):
+                pen = write_penalties(table, cols) if callable(write_penalties) else write_penalties.get((table, cols), 0.0)
+                print(f"  {table}({', '.join(cols)}): write_penalty = {pen:.4f}")
 
-    selected = cs_module.selectConfiguration(
-        conn, W, candidateIndexes,
-        m=m_val, k=k_val,
-        storage_budget=storage_budget,
-        max_group=m_val,
-        write_penalties=write_penalties,
-        query_weights=query_weights
-    )
+        # --- 5. Configuration Selection ---
+        cs_config = cfg.get("config_selection", {})
+        m_val = int(cs_config.get("m", 2))
+        k_val = int(cs_config.get("k", 10))
+        storage_budget = cs_config.get("storage_budget", float("inf"))
+        if isinstance(storage_budget, str) and storage_budget.lower() != "inf":
+            storage_budget = float(storage_budget)
 
-    print("\nSelected Index Configuration:")
-    for table, cols in selected:
-        pen = write_penalties(table, tuple(cols)) if write_penalties and callable(write_penalties) else 0.0
-        print(f"  CREATE INDEX ON {table}({', '.join(cols)});  [write_penalty = {pen:.4f}]")
+        cs_kwargs = {
+            "m": m_val,
+            "k": k_val,
+            "storage_budget": storage_budget,
+            "max_group": m_val,
+            "write_penalties": write_penalties,
+            "query_weights": query_weights,
+        }
+        for k, v in cs_config.items():
+            if k not in ["module"]:
+                cs_kwargs[k] = v
+
+        selected = cs_module.selectConfiguration(
+            conn, W, candidateIndexes,
+            **cs_kwargs
+        )
+
+        if verbose:
+            print("\nSelected Index Configuration:")
+            for table, cols in selected:
+                pen = write_penalties(table, tuple(cols)) if write_penalties and callable(write_penalties) else 0.0
+                print(f"  CREATE INDEX ON {table}({', '.join(cols)});  [write_penalty = {pen:.4f}]")
+
+        return selected, W, query_weights, write_penalties
+    finally:
+        if close_conn_on_exit and conn:
+            conn.close()
 
 
-    # todo
-    # generate :  create_index.sql, delete_index.sql
+def main():
+    run_auto_index_selector()
+    return 0
 
-    if TEST:
-        pass
 
 if __name__ == "__main__":
     sys.exit(main())

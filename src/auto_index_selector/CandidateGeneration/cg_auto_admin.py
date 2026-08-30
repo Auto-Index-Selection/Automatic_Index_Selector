@@ -179,10 +179,9 @@ def listToDict(candidateIndexes: List) -> Dict:
         column = index.split('.')[1]
         if table not in result.keys():
             result[table] = []
-        result[table].append(column)
+        result[table].append([column] if isinstance(column, str) else list(column))
 
     return result
-    pass
 
 def bestConf(conn, W: List, schema: Dict) -> Dict:
     '''

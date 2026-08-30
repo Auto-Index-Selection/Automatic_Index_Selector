@@ -351,6 +351,8 @@ def take_snapshot(conn) -> PgStatSnapshot:
                   AND query NOT ILIKE '%pg_namespace%'
                   AND query NOT ILIKE '%pg_database%'
                   AND query NOT ILIKE '%pg_type%'
+                  AND query NOT ILIKE '%pg_relation_size%'
+                  AND query NOT ILIKE '%pg_size_pretty%'
                   AND query ILIKE 'SELECT%'
                   AND query NOT ILIKE 'SELECT 1%';
             """)
