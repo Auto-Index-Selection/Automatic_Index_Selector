@@ -210,32 +210,14 @@ def main():
     if isinstance(storage_budget, str) and storage_budget.lower() != "inf":
         storage_budget = float(storage_budget)
 
-    if hasattr(cs_module, "selectConfiguration"):
-        selected = cs_module.selectConfiguration(
-            conn, W, candidateIndexes,
-            m=m_val, k=k_val,
-            storage_budget=storage_budget,
-            max_group=m_val,
-            write_penalties=write_penalties,
-            query_weights=query_weights
-        )
-    elif hasattr(cs_module, "greedyMK"):
-        selected = cs_module.greedyMK(
-            conn, W, candidateIndexes,
-            m=m_val, k=k_val,
-            write_penalties=write_penalties,
-            query_weights=query_weights
-        )
-    elif hasattr(cs_module, "dropHeuristic"):
-        selected = cs_module.dropHeuristic(
-            conn, W, candidateIndexes,
-            storage_budget=storage_budget,
-            max_group=m_val,
-            write_penalties=write_penalties,
-            query_weights=query_weights
-        )
-    else:
-        raise AttributeError(f"Module {cs_module.__name__} has no supported selection function")
+    selected = cs_module.selectConfiguration(
+        conn, W, candidateIndexes,
+        m=m_val, k=k_val,
+        storage_budget=storage_budget,
+        max_group=m_val,
+        write_penalties=write_penalties,
+        query_weights=query_weights
+    )
 
     print("\nSelected Index Configuration:")
     for table, cols in selected:
