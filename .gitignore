@@ -9,3 +9,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+tests/tpcc/results/
+legacy_tests/
+tools/
+*.txt
+bug

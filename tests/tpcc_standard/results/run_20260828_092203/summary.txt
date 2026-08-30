@@ -1,7 +1,0 @@
-Workload: TPC-C Standard (9 Tables)
-Timestamp: 20260828_092203
-Duration: 0.01 minutes
-Iterations: 1
-
-Rankings (avg seconds):
-baseline: 0.004835

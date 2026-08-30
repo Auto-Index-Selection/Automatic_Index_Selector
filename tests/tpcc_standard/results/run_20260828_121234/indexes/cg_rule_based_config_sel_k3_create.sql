@@ -1,3 +1,0 @@
-CREATE INDEX IF NOT EXISTS ais_tpcc_std_customer_c_w_id ON customer (c_w_id);
-CREATE INDEX IF NOT EXISTS ais_tpcc_std_order_line_ol_w_id_ol_d_id_ol_o_id ON order_line (ol_w_id, ol_d_id, ol_o_id);
-CREATE INDEX IF NOT EXISTS ais_tpcc_std_stock_s_i_id_s_w_id_s_quantity ON stock (s_i_id, s_w_id, s_quantity);

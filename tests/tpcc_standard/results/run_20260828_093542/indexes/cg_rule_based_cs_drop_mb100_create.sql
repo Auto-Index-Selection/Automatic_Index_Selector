@@ -1,2 +1,0 @@
-CREATE INDEX IF NOT EXISTS ais_tpcc_std_customer_c_w_id_c_last ON customer (c_w_id, c_last);
-CREATE INDEX IF NOT EXISTS ais_tpcc_std_stock_s_w_id ON stock (s_w_id);
