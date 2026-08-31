@@ -19,9 +19,15 @@ k = 2
 n_workers = 8
  
 [config_selection.cs_drop]
-# s -> storage budget
+# storage_budget in MB
+storage_budget = 400
 # n_workers -> parallel HypoPG workers (None = cpu_count()-1, 1 = serial)
-s = 400
+n_workers = 8
+
+[config_selection.cs_extend]
+# storage_budget in MB
+storage_budget = 400
+# n_workers -> parallel HypoPG workers (None = cpu_count()-1, 1 = serial)
 n_workers = 8
  
 [workload]

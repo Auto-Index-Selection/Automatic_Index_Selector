@@ -130,14 +130,25 @@ def main():
 
     # config selection
     cs_params = get_module_params("config_selection", config)
-    print(cs_params)
-    config = cs_module.selectConfiguration(conn, W, candidateIndexes, **cs_params)
-    print(config)
+    
+    # Handle storage budget param alias and conversion (MB -> Bytes)
+    if "s" in cs_params and "storage_budget" not in cs_params:
+        cs_params["storage_budget"] = cs_params.pop("s")
+    if "storage_budget" in cs_params:
+        # If passed in MB (typical value < 100_000), convert to bytes
+        if cs_params["storage_budget"] < 100_000:
+            cs_params["storage_budget"] = int(cs_params["storage_budget"] * 1024 * 1024)
 
+    # Pass db_name so parallel HypoPG workers connect to the correct database
+    cs_params.setdefault("db_name", DB_NAME)
+
+    print(f"Config Selection Parameters: {cs_params}")
+    selected_config = cs_module.selectConfiguration(conn, W, candidateIndexes, **cs_params)
+    print(f"Selected Configuration: {selected_config}")
 
     # generate :  create_index.sql, delete_index.sql
-    create_path = generate_create_index_sql(config)
-    delete_path = generate_delete_index_sql(config)
+    create_path = generate_create_index_sql(selected_config)
+    delete_path = generate_delete_index_sql(selected_config)
     print(f"Wrote {create_path}")
     print(f"Wrote {delete_path}")
 
