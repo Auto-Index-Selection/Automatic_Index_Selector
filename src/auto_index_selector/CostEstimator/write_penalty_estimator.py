@@ -106,9 +106,6 @@ class TableDMLDelta:
     # Per-column-set update rows: {frozenset({'colA', 'colB'}): rows_updated_delta}
     # Provides exact set-level granularity for HOT-aware penalty estimation.
     column_set_update_rows: Dict[FrozenSet[str], int] = field(default_factory=dict)
-    # Rolled-up / single-column update rows: {column_name: rows_updated_delta}
-    # Fallback when column set stats are unavailable.
-    column_update_rows: Dict[str, int] = field(default_factory=dict)
 
 
 TableDMLDeltaMap = Dict[str, TableDMLDelta]
@@ -192,16 +189,9 @@ class WritePenaltyEstimator:
             try:
                 cur.execute("SELECT * FROM advisor_get_column_set_stats()")
                 for row in cur.fetchall():
-                    rel_name = row[0]
-                    if rel_name and '.' in rel_name:
-                        rel_name = rel_name.split('.')[-1]
+                    rel_name = row[0].split('.')[-1] if row[0] else ""
                     raw_cols = row[1]
-                    if isinstance(raw_cols, list):
-                        col_set = tuple(raw_cols)
-                    elif isinstance(raw_cols, tuple):
-                        col_set = raw_cols
-                    else:
-                        col_set = tuple(str(raw_cols).strip('{}').split(',')) if raw_cols else ()
+                    col_set = tuple(raw_cols) if raw_cols else ()
 
                     results.append(ColumnSetUpdateStats(
                         relation_name=rel_name,
@@ -269,10 +259,6 @@ class WritePenaltyEstimator:
                         table_name=s.relation_name
                     )
                 deltas[s.relation_name].column_set_update_rows[set_key] = row_delta
-                # Unroll into column_update_rows for single-column lookup
-                for col in s.column_set:
-                    prev_val = deltas[s.relation_name].column_update_rows.get(col, 0)
-                    deltas[s.relation_name].column_update_rows[col] = prev_val + row_delta
 
         return deltas
 
@@ -405,13 +391,8 @@ class WritePenaltyEstimator:
                     penalty += rows * scale * update_cost_non_hot
                 # else: HOT update (disjoint set) → 0 penalty
 
-        elif delta.column_update_rows:
-            # Secondary fallback: single-column stats
-            for col, rows in delta.column_update_rows.items():
-                if col in indexed_cols:
-                    penalty += rows * scale * update_cost_non_hot
         else:
-            # Tertiary fallback: whole-table update count (assume non-HOT)
+            # Fallback: whole-table update count (assume non-HOT)
             penalty += delta.delta_updates * scale * update_cost_non_hot
 
         return penalty

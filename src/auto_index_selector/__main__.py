@@ -15,34 +15,16 @@ pointing config.toml at its module name (no ".py" extension).
 import sys
 import importlib
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict, Any
-try:
-    from pyprojroot import here
-except ImportError:
-    def here() -> Path:
-        return Path(__file__).resolve().parent.parent.parent.parent
-
+from typing import Optional
+import os
 import psycopg2
 from dotenv import load_dotenv
-import os
 
-# tomllib is stdlib from Python 3.11+; fall back to the tomli backport
-# for older interpreters.
-try:
-    import tomllib
-except ModuleNotFoundError:
-    try:
-        import tomli as tomllib
-    except ModuleNotFoundError as e:
-        raise ImportError(
-            "tomllib is not available in stdlib (requires Python 3.11+), "
-            "and the 'tomli' package is not installed. "
-            "Install it with: pip install tomli"
-        ) from e
+import tomllib
 
 from auto_index_selector.Workload.pgStatStatementsWorkload import take_snapshot, get_delta_workload
 
-DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.toml"
+CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config.toml"
 
 SECTION_TO_PACKAGE = {
     "candidate_generation": "auto_index_selector.CandidateGeneration",
@@ -51,20 +33,12 @@ SECTION_TO_PACKAGE = {
 
 
 def load_config(config_path: Optional[Path] = None) -> dict:
-    """Load and parse config.toml from standard search paths."""
-    candidates = []
-    if config_path:
-        candidates.append(Path(config_path))
-    candidates.extend([
-        Path.cwd() / "config.toml",
-        Path(__file__).resolve().parent.parent.parent / "config.toml",
-        Path(__file__).resolve().parent / "config.toml",
-    ])
-    for p in candidates:
-        if p.exists():
-            with open(p, "rb") as f:
-                return tomllib.load(f)
-    raise FileNotFoundError(f"Config file not found in any search path: {[str(c) for c in candidates]}")
+    """Load and parse config.toml directly from the project root or specified path."""
+    target = Path(config_path) if config_path else CONFIG_PATH
+    if not target.exists():
+        raise FileNotFoundError(f"Config file not found at: {target}")
+    with open(target, "rb") as f:
+        return tomllib.load(f)
 
 
 def import_selected_module(section: str, config: dict):
@@ -97,7 +71,7 @@ def import_selected_module(section: str, config: dict):
     return module
 
 
-def load_pipeline(config_path: Path = DEFAULT_CONFIG_PATH):
+def load_pipeline(config_path: Optional[Path] = None):
     """
     Load config.toml and import the algorithmic stage modules (CandidateGeneration, ConfigSelection).
     Returns a dict: {"candidate_generation": module, "config_selection": module}
@@ -112,6 +86,24 @@ def load_pipeline(config_path: Path = DEFAULT_CONFIG_PATH):
 
 
 TEST = False
+
+
+def _as_storage_budget(value) -> float:
+    """
+    Coerce a storage budget into a real float (bytes).
+
+    config.toml spells the unconstrained budget as the *string* "inf". The
+    selection modules test the budget against float("inf") to detect "no
+    limit", and a string never compares equal to a float, so an uncoerced
+    "inf" makes them take the constrained branch and silently discard the
+    caller's budget. Missing or unparseable values mean "no limit".
+    """
+    if value is None:
+        return float("inf")
+    try:
+        return float(value)  # float() already parses "inf" and numeric strings
+    except (TypeError, ValueError):
+        return float("inf")
 
 
 def _normalise_candidates(candidates):
@@ -166,7 +158,7 @@ def run_auto_index_selector(
     if verbose:
         print(f"[CandidateGeneration] using module: {cg_module.__name__}")
         print(f"[ConfigSelection]     using module: {cs_module.__name__}")
-        print(f"[Workload]            using pg_stat_statements (live delta workload)")
+        # print(f"[Workload]            using pg_stat_statements (live delta workload)")
 
     # connection setup
     close_conn_on_exit = False
@@ -194,12 +186,22 @@ def run_auto_index_selector(
             from auto_index_selector.CostEstimator.write_penalty_estimator import WritePenaltyEstimator
             write_scale = float(wp_config.get("write_scale", 1.0))
             wp_estimator = WritePenaltyEstimator(conn, write_scale=write_scale)
-            wp_estimator.ensure_extension()
-            snap_before_writes = wp_estimator.snapshot()
+            try:
+                wp_estimator.ensure_extension()
+                snap_before_writes = wp_estimator.snapshot()
+            except Exception as e:
+                print(f"[WritePenalty]  Error: Failed to capture write stats before-snapshot: {e}")
+                return set(), [], {}, None
+
             if verbose:
                 print(f"[WritePenalty] Captured write before-snapshot (scale={write_scale})")
 
-        snap_before_reads = take_snapshot(conn)
+        try:
+            snap_before_reads = take_snapshot(conn)
+        except Exception as e:
+            print(f"[Workload]  Error: Failed to capture pg_stat_statements before-snapshot: {e}")
+            return set(), [], {}, None
+
         if verbose:
             print(f"[Workload] Captured pg_stat_statements before-snapshot ({len(snap_before_reads.entries)} queries tracked)")
 
@@ -212,25 +214,37 @@ def run_auto_index_selector(
             time.sleep(duration)
 
         # --- Capture both after-snapshots immediately when observation window ends ---
-        snap_after_reads = take_snapshot(conn)
+        try:
+            snap_after_reads = take_snapshot(conn)
+        except Exception as e:
+            print(f"[Workload] Error: Failed to capture pg_stat_statements after-snapshot: {e}")
+            return set(), [], {}, None
 
         snap_after_writes = None
         if wp_enabled and wp_estimator and snap_before_writes:
-            snap_after_writes = wp_estimator.snapshot()
+            try:
+                snap_after_writes = wp_estimator.snapshot()
+            except Exception as e:
+                print(f"[WritePenalty] Error: Failed to capture write stats after-snapshot: {e}")
+                return set(), [], {}, None
 
         # --- 3. Extract Read & Write Workload Deltas Immediately ---
         W, schema, query_weights = get_delta_workload(conn, snap_before_reads, snap_after_reads)
-        if not W and duration == 0:
-            from auto_index_selector.Workload.pgStatStatementsWorkload import getWorkload
-            W, schema, query_weights = getWorkload(conn)
+        if not W:
+            if duration == 0:
+                print("[Workload] Error: Observation window duration is 0s and no active queries were observed between snapshots.")
+                print("           Cannot select indexes without observed query traffic. Exiting.")
+            else:
+                print(f"[Workload] Error: 0 queries were observed during the {duration}s observation window.")
+                print("           Cannot select indexes without observed query traffic. Exiting.")
+            return set(), [], {}, None
 
         if verbose:
             print(f"Loaded Workload: {len(W)} active queries loaded (weighted by pg_stat_statements call counts).")
-            if W:
-                print("\n--- [Workload] Parsed & Resolved Active Queries ---")
-                for i, q in enumerate(W, 1):
-                    calls = int(query_weights.get(q, 1.0))
-                    print(f"  [{i}] (calls={calls}): {q}")
+            print("\n--- [Workload] Parsed & Resolved Active Queries ---")
+            for i, q in enumerate(W, 1):
+                calls = int(query_weights.get(q, 1.0))
+                print(f"  [{i}] (calls={calls}): {q}")
 
         write_penalties = None
         if wp_enabled and wp_estimator and snap_before_writes and snap_after_writes:
@@ -248,42 +262,45 @@ def run_auto_index_selector(
             print(f"Candidate Indexes Generated: {total_candidates} candidates across tables.")
 
         # --- Log Candidate Write Penalties ---
-        if write_penalties and candidateIndexes and verbose:
-            print("\n--- [Write Penalty] Candidate Indexes & Calculated Penalties ---")
-            all_candidates = []
-            if isinstance(candidateIndexes, dict):
-                for t, col_lists in candidateIndexes.items():
-                    for cols in col_lists:
-                        all_candidates.append((t, tuple(cols)))
-            elif isinstance(candidateIndexes, (list, set, frozenset)):
-                for item in candidateIndexes:
-                    if isinstance(item, tuple) and len(item) == 2:
-                        t, cols = item
-                        all_candidates.append((t, tuple(cols) if isinstance(cols, (list, tuple)) else (cols,)))
+        # if write_penalties and candidateIndexes and verbose:
+        #     print("\n--- [Write Penalty] Candidate Indexes & Calculated Penalties ---")
+        #     all_candidates = []
+        #     if isinstance(candidateIndexes, dict):
+        #         for t, col_lists in candidateIndexes.items():
+        #             for cols in col_lists:
+        #                 all_candidates.append((t, tuple(cols)))
+        #     elif isinstance(candidateIndexes, (list, set, frozenset)):
+        #         for item in candidateIndexes:
+        #             if isinstance(item, tuple) and len(item) == 2:
+        #                 t, cols = item
+        #                 all_candidates.append((t, tuple(cols) if isinstance(cols, (list, tuple)) else (cols,)))
 
-            for table, cols in sorted(all_candidates):
-                pen = write_penalties(table, cols) if callable(write_penalties) else write_penalties.get((table, cols), 0.0)
-                print(f"  {table}({', '.join(cols)}): write_penalty = {pen:.4f}")
+        #     for table, cols in sorted(all_candidates):
+        #         pen = write_penalties(table, cols) if callable(write_penalties) else write_penalties.get((table, cols), 0.0)
+        #         print(f"  {table}({', '.join(cols)}): write_penalty = {pen:.4f}")
 
         # --- 5. Configuration Selection ---
+        # cs_config is already config.toml merged with config_override (see the
+        # top of this function), so it is the single source for the selection
+        # kwargs. Forward everything except 'module' first, then normalise the
+        # values the selection modules are type-sensitive about. Coercing before
+        # the copy would be pointless: the copy would overwrite it with the raw
+        # config value.
         cs_config = cfg.get("config_selection", {})
-        m_val = int(cs_config.get("m", 2))
-        k_val = int(cs_config.get("k", 10))
-        storage_budget = cs_config.get("storage_budget", float("inf"))
-        if isinstance(storage_budget, str) and storage_budget.lower() != "inf":
-            storage_budget = float(storage_budget)
 
         cs_kwargs = {
-            "m": m_val,
-            "k": k_val,
-            "storage_budget": storage_budget,
-            "max_group": m_val,
             "write_penalties": write_penalties,
             "query_weights": query_weights,
         }
         for k, v in cs_config.items():
             if k not in ["module"]:
                 cs_kwargs[k] = v
+
+        m_val = int(cs_kwargs.get("m", 2))
+        cs_kwargs["m"] = m_val
+        cs_kwargs["k"] = int(cs_kwargs.get("k", 10))
+        cs_kwargs["storage_budget"] = _as_storage_budget(cs_kwargs.get("storage_budget"))
+        cs_kwargs.setdefault("max_group", m_val)
 
         selected = cs_module.selectConfiguration(
             conn, W, candidateIndexes,
