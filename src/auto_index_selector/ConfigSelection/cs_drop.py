@@ -1,7 +1,12 @@
 # to be integrated
 
 import sqlglot
-from auto_index_selector.CostEstimator.costEstimator import *
+from auto_index_selector.CostEstimator.costEstimator import (
+    flattenCandidateIndexes,
+    estimateWorkloadCostForConfig,
+    make_db_params,
+    parallel_cost_evaluator,
+)
 from itertools import combinations
 
 
@@ -135,14 +140,15 @@ def buildSizeMap(conn, candidate_indexes, size_cache=None):
 
 
 def dropHeuristic(conn, W, candidate_dict, storage_budget,
-                  max_group=2, cost_cache=None, size_cache=None, verbose=False):
+                  max_group=2, cost_cache=None, size_cache=None, verbose=False,
+                  n_workers=None, db_name=None):
     """
     DROP heuristic (Whang 1985, Algorithm 1), adapted to the
     table -> [[col,...], ...] candidate format and to a hard STORAGE budget.
 
     Parameters
     ----------
-    conn           : psycopg2 connection
+    conn           : psycopg2 connection  (used for serial fallback only)
     W              : list[str] SQL queries (the workload)
     candidate_dict : dict(table -> list[list[str]])
                      your existing candidate-index structure
@@ -170,6 +176,9 @@ def dropHeuristic(conn, W, candidate_dict, storage_budget,
                      re-hit HypoPG+optimizer for configs you've already scored.
     size_cache     : optional dict memoizing (table, columns) -> size in bytes.
     verbose        : print the drop trace
+    n_workers      : number of parallel worker processes.
+                     None  -> cpu_count()-1 (recommended)
+                     1     -> fully serial (same behaviour as before)
 
     Returns
     -------
@@ -182,22 +191,49 @@ def dropHeuristic(conn, W, candidate_dict, storage_budget,
     candidate_indexes = flattenCandidateIndexes(candidate_dict)
     size_cache = buildSizeMap(conn, candidate_indexes, size_cache)
 
+    db_params = make_db_params(db_name=db_name)
+
+    with parallel_cost_evaluator(db_params, W, n_workers=n_workers) as pce:
+        S = _drop_inner(pce, W, candidate_indexes, size_cache, cost_cache,
+                        storage_budget, max_group, verbose)
+
+    return S
+
+
+def _drop_inner(pce, W, candidate_indexes, size_cache, cost_cache,
+                storage_budget, max_group=2, verbose=False):
+    """
+    Core DROP logic that runs against an already-open parallel_cost_evaluator.
+
+    Separated from dropHeuristic so that selectConfigurations can sweep
+    multiple budgets inside a single pce session, sharing cost_cache across
+    all of them and avoiding redundant HypoPG round-trips.
+    """
+
     def cost(config):
         key = frozenset(config)
         if key not in cost_cache:
-            cost_cache[key] = estimateWorkloadCostForConfig(conn, W, key)
+            results = pce.batch_cost([key])
+            cost_cache.update(results)
         return cost_cache[key]
+
+    def batch_cost_cached(configs):
+        """Evaluate a list of frozenset configs, skipping already-cached ones."""
+        uncached = [c for c in configs if c not in cost_cache]
+        if uncached:
+            results = pce.batch_cost(uncached)
+            cost_cache.update(results)
+        return {c: cost_cache[c] for c in configs}
 
     def size(config):
         return sum(size_cache[idx] for idx in config)
 
-    max_group = max(1, min(max_group, len(candidate_indexes)))
+    eff_max_group = max(1, min(max_group, len(candidate_indexes)))
 
     def mb(x):
         return x / (1024.0 ** 2)
 
     # --- Step 1: start from the FULL candidate set ---------------------------
-    # This is the entire difference from ADD/Greedy: begin rich, not empty.
     S = frozenset(candidate_indexes)
 
     if verbose:
@@ -205,36 +241,34 @@ def dropHeuristic(conn, W, candidate_dict, storage_budget,
               f"budget={mb(storage_budget):,.1f} MB  cost={cost(S):,.2f}")
 
     # --- Step 2: forced reduction until we fit in the storage budget ---------
-    # We are almost certainly over budget after Step 1, so indexes must go even
-    # where removing them RAISES cost. The ranking here decides how much damage
-    # that does.
-    #
-    # We rank each candidate removal by  (cost increase) / (bytes freed)  and
-    # take the SMALLEST -- i.e. the least damage per byte reclaimed. A removal
-    # that lowers cost has a negative ratio and is taken first, for free.
-    #
-    # Ranking instead by "lowest resulting cost" is the obvious thing to do and is
-    # measurably worse: it happily evicts a tiny cheap index when evicting one
-    # huge index would have freed the same space for less damage. See the header.
     while size(S) > storage_budget:
         current_cost = cost(S)
         current_size = size(S)
 
-        best_config = None
-        best_ratio = float("inf")
-
-        for group_size in range(1, max_group + 1):
+        trials = {}
+        for group_size in range(1, eff_max_group + 1):
             for group in combinations(sorted(S), group_size):
                 trial = S - frozenset(group)
                 bytes_freed = current_size - size(trial)
                 if bytes_freed <= 0:
                     continue
-                ratio = (cost(trial) - current_cost) / bytes_freed
-                if ratio < best_ratio:
-                    best_ratio = ratio
-                    best_config = trial
+                trials[trial] = bytes_freed
 
-        if best_config is None:          # nothing left to remove
+        if not trials:
+            break
+
+        results = batch_cost_cached(list(trials.keys()))
+
+        best_config = None
+        best_ratio = float("inf")
+        for trial, trial_cost in results.items():
+            bytes_freed = trials[trial]
+            ratio = (trial_cost - current_cost) / bytes_freed
+            if ratio < best_ratio:
+                best_ratio = ratio
+                best_config = trial
+
+        if best_config is None:
             break
 
         removed = sorted(S - best_config)
@@ -244,31 +278,27 @@ def dropHeuristic(conn, W, candidate_dict, storage_budget,
                   f"size={mb(size(S)):,.1f} MB  cost={cost(S):,.2f}")
 
     # --- Step 3: keep dropping while it genuinely reduces cost ---------------
-    # Whang's steps 2-8: group size 1 until stuck, then 2 until stuck, then 3...
-    # We are now inside the budget, so every further removal is voluntary and is
-    # taken only if it strictly lowers workload cost.
-    #
-    # Note this can leave storage unused, and that is correct -- it is the point of
-    # DROP. An index whose maintenance cost exceeds its query benefit should not be
-    # built even when the budget would allow it. Greedy(m,k) has the same property
-    # via its "stop if adding doesn't reduce cost" guard.
-    for group_size in range(1, max_group + 1):
+    for group_size in range(1, eff_max_group + 1):
         while True:
             if len(S) < group_size:
                 break
 
             current_cost = cost(S)
-            best_config = None
-            best_cost = current_cost      # must STRICTLY beat this to count
 
-            for group in combinations(sorted(S), group_size):
-                trial = S - frozenset(group)
-                trial_cost = cost(trial)
+            trial_to_group = {
+                S - frozenset(group): group
+                for group in combinations(sorted(S), group_size)
+            }
+            results = batch_cost_cached(list(trial_to_group.keys()))
+
+            best_config = None
+            best_cost = current_cost
+
+            for trial, trial_cost in results.items():
                 if trial_cost < best_cost:
                     best_cost = trial_cost
                     best_config = trial
 
-            # Nothing at this group size helps -> escalate to the next size
             if best_config is None:
                 if verbose:
                     print(f"    no improvement dropping {group_size} at a time")
@@ -281,15 +311,73 @@ def dropHeuristic(conn, W, candidate_dict, storage_budget,
                       f"size={mb(size(S)):,.1f} MB  cost={best_cost:,.2f}")
 
     if verbose:
+        final_cost = cost_cache.get(frozenset(S), float('nan'))
         print(f"  RESULT |S|={len(S)}  size={mb(size(S)):,.1f} MB "
-              f"of {mb(storage_budget):,.1f} MB  cost={cost(S):,.2f}")
+              f"of {mb(storage_budget):,.1f} MB  cost={final_cost:,.2f}")
 
     return S
 
 
 def selectConfiguration(conn, W, candidate_dict, storage_budget,
-                        max_group=2, cost_cache=None, size_cache=None):
+                        max_group=2, cost_cache=None, size_cache=None,
+                        n_workers=None, db_name=None, **kwargs):
+    """Single-budget convenience wrapper around dropHeuristic."""
     return dropHeuristic(conn, W, candidate_dict, storage_budget,
+                         verbose=True,
                          max_group=max_group,
                          cost_cache=cost_cache,
-                         size_cache=size_cache)
+                         size_cache=size_cache,
+                         n_workers=n_workers,
+                         db_name=db_name)
+
+
+def selectConfigurations(conn, W, candidate_dict, storage_budgets_mb,
+                         max_group=2, cost_cache=None, size_cache=None,
+                         n_workers=None, verbose=True, db_name=None, **kwargs):
+    """
+    Run DROP for *multiple* storage budgets in a single pass.
+
+    Opens ONE parallel_cost_evaluator and shares cost_cache across all budget
+    levels, so configurations evaluated for the largest budget are reused for
+    every smaller one -- dramatically reducing total HypoPG round-trips.
+
+    Budgets are processed from LARGEST to SMALLEST so that the most expensive
+    evaluation (full candidate set vs. the most permissive budget) is done
+    first and its results benefit all subsequent, tighter budgets.
+
+    Parameters
+    ----------
+    storage_budgets_mb : list[int | float]
+        Storage budgets in MEGABYTES (e.g. [500, 450, 400, ..., 100]).
+        Order does not matter; they are sorted descending internally.
+
+    Returns
+    -------
+    dict[int, frozenset]
+        {budget_in_bytes: chosen_config} for every requested budget.
+    """
+    if cost_cache is None:
+        cost_cache = {}
+
+    candidate_indexes = flattenCandidateIndexes(candidate_dict)
+    size_cache = buildSizeMap(conn, candidate_indexes, size_cache)
+    db_params = make_db_params(db_name=db_name)
+
+    # Largest budget first — maximises cache reuse for tighter budgets.
+    budgets_bytes = sorted(
+        [int(b * 1024 * 1024) for b in storage_budgets_mb], reverse=True
+    )
+
+    configs = {}
+    with parallel_cost_evaluator(db_params, W, n_workers=n_workers) as pce:
+        for budget in budgets_bytes:
+            if verbose:
+                print(f"\n=== DROP  budget={budget / (1024**2):,.0f} MB ===")
+            configs[budget] = _drop_inner(
+                pce, W, candidate_indexes, size_cache, cost_cache,
+                budget, max_group, verbose
+            )
+
+    return configs
+
+

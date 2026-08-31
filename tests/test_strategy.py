@@ -19,6 +19,10 @@ import csv
 import importlib
 
 ITERATIONS = 3
+# Number of parallel HypoPG worker processes used by cs_greedy / cs_drop.
+# Set to 1 to force fully serial execution (useful for profiling / debugging).
+# None means cpu_count()-1.
+N_WORKERS = 14
 DEFAULT_QUERY_TIMINGS_PATH = Path(str(here() / 'results' / 'rb_g'  / 'tpcds'))
 DEFAULT_TOTAL_TIMINGS_PATH = Path(str(here() / 'results' / 'rb_g'  / 'tpcds_total'))
 def execute_sql_file(conn, path: Path) -> None:
@@ -141,12 +145,19 @@ def exp_size(conn, cg, cs, w, w_name, storage):
     print(f"Wrote average total workload timing to {total_csv_path}")
     pass
 
-def test_strategy(conn, cg, cs, w_name, w, candidate_indexes):
+def test_strategy(conn, cg, cs, w_name, w, candidate_indexes, db_name=None):
     cs_module = importlib.import_module(f"auto_index_selector.ConfigSelection.{cs}")
     
     if cs in ['cs_drop', 'cs_extend']:
-        for storage in [50, 100, 150, 200, 250, 300, 350, 400, 450, 500]:
-            config = cs_module.selectConfiguration(conn, w, candidate_indexes, storage)
+        budgets_mb = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000]
+        # One pce session + shared cost_cache for all budgets — much faster.
+        configs = cs_module.selectConfigurations(conn, w, candidate_indexes,
+                                                 storage_budgets_mb=budgets_mb,
+                                                 db_name=db_name,
+                                                 n_workers=N_WORKERS)
+        for budget_bytes, config in sorted(configs.items()):
+            storage = budget_bytes // (1024 * 1024)   # back to MB for file names
+            print(f"\n--- Budget {storage} MB ---")
             create_path = generate_create_index_sql(config, Path(str(here() / 'indexes' / f'{w_name}_{cg}_{cs}_{storage}_create.sql')))
             delete_path = generate_delete_index_sql(config, Path(str(here() / 'indexes' / f'{w_name}_{cg}_{cs}_{storage}_delete.sql')))
 
@@ -158,9 +169,17 @@ def test_strategy(conn, cg, cs, w_name, w, candidate_indexes):
 
             execute_sql_file(conn, delete_path)
             print(f"Dropped indexes using {delete_path}")
+
     elif cs in ['cs_greedy']:
-        for k in [2, 3, 4, 5, 6, 7, 8, 9, 10]:
-            config = cs_module.selectConfiguration(conn, w, candidate_indexes, k=k, m=2)
+        k_list = [2, 3, 4, 5, 6, 7, 8, 9, 10]
+        # One pce session + shared cost_cache for all k values — single forward pass.
+        configs = cs_module.selectConfigurations(conn, w, candidate_indexes,
+                                                 k_list=k_list,
+                                                 m=2,
+                                                 db_name=db_name,
+                                                 n_workers=N_WORKERS)
+        for k, config in sorted(configs.items()):
+            print(f"\n--- Greedy k={k}, m=2 ---")
             create_path = generate_create_index_sql(config, Path(str(here() / 'indexes' / f'{w_name}_{cg}_{cs}_{k}_{2}_create.sql')))
             delete_path = generate_delete_index_sql(config, Path(str(here() / 'indexes' / f'{w_name}_{cg}_{cs}_{k}_{2}_delete.sql')))
 

@@ -57,6 +57,29 @@ def run_with_progress(target_func, total, desc="Processing"):
     return result
 
 
+def make_db_params(db_name: str = None) -> dict:
+    """
+    Read DB connection parameters from the .env file and return them as a
+    dict suitable for passing to psycopg2.connect(**db_params).
+
+    Parameters
+    ----------
+    db_name : str, optional
+        Override the database name.  Pass the DB_NAME returned by
+        getWorkload() so worker processes connect to the correct database
+        regardless of what DB_NAME is set to in .env.
+    """
+    load_dotenv()
+    return dict(
+        dbname=db_name if db_name is not None else os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        host=os.getenv("DB_HOST", "/var/run/postgresql"),
+        port=os.getenv("DB_PORT"),
+    )
+
+
+
 def clearHypotheticalIndexes(conn):
     """
     Remove all HypoPG indexes.
@@ -195,6 +218,101 @@ def _eval_config(args):
     return k, results
 
 
+# ------------------------------------------------------------------ #
+# Lightweight per-config worker used by cs_greedy / cs_drop
+# ------------------------------------------------------------------ #
+# Each task is (config_key, W) where:
+#   config_key : frozenset[(table, tuple[str, ...])]
+#   W          : list[str]  -- the SQL workload
+#
+# Returns (config_key, total_workload_cost).
+# HypoPG indexes are session-scoped so each worker process has its own
+# isolated hypothetical-index state; no locking needed.
+
+def _init_worker_simple(db_params):
+    """Worker initializer for parallel_cost_evaluator (no indexSet needed)."""
+    global _worker_conn
+    _worker_conn = psycopg2.connect(**db_params)
+    _worker_conn.autocommit = True
+
+
+def _eval_config_for_greedy(args):
+    """
+    Evaluate the total workload cost for ONE frozenset configuration.
+    Returns (config_key, total_cost).
+    """
+    config_key, W = args
+    conn = _worker_conn
+    clearHypotheticalIndexes(conn)
+    if config_key:
+        createCompositeHypoIndexes(conn, config_key)
+    total = sum(getQueryCost(conn, q) for q in W)
+    clearHypotheticalIndexes(conn)
+    return config_key, total
+
+
+class parallel_cost_evaluator:
+    """
+    Context manager that opens a multiprocessing.Pool once and exposes a
+    ``batch_cost`` method to evaluate a list of frozenset configs in parallel.
+
+    Usage::
+
+        with parallel_cost_evaluator(db_params, W, n_workers=8) as pce:
+            results = pce.batch_cost([frozenset(...), ...])
+            # results: dict[frozenset -> float]
+
+    Falls back to serial evaluation when n_workers <= 1.
+    """
+
+    def __init__(self, db_params: dict, W: list, n_workers: int = None):
+        self._db_params = db_params
+        self._W = W
+        if n_workers is None:
+            n_workers = max(1, mp.cpu_count() - 1)
+        self._n_workers = n_workers
+        self._pool = None
+
+    def __enter__(self):
+        if self._n_workers > 1:
+            self._pool = mp.Pool(
+                processes=self._n_workers,
+                initializer=_init_worker_simple,
+                initargs=(self._db_params,),
+            )
+        return self
+
+    def __exit__(self, *_):
+        if self._pool is not None:
+            self._pool.close()
+            self._pool.join()
+            self._pool = None
+
+    def batch_cost(self, configs: list) -> dict:
+        """
+        Evaluate every frozenset config in ``configs`` and return a dict
+        mapping each config to its total workload cost.
+
+        Already-cached configs should be filtered out by the caller before
+        passing them here.
+        """
+        if not configs:
+            return {}
+
+        results = {}
+        if self._pool is not None:
+            tasks = [(cfg, self._W) for cfg in configs]
+            for cfg_key, cost in self._pool.imap_unordered(_eval_config_for_greedy, tasks):
+                results[cfg_key] = cost
+        else:
+            # serial fallback (n_workers=1 or pool failed to open)
+            for cfg in configs:
+                _, cost = _eval_config_for_greedy((cfg, self._W))
+                results[cfg] = cost
+
+        return results
+
+
 def estimateCostInitParallel(pool, W):
     """
     Parallel version of cost_init - splits the query list across the
@@ -245,13 +363,7 @@ def estimateWorkloadCost(conn, W, configurations, indexSet, db_params=None, n_wo
     Falls back to fully serial (using the single `conn` passed in) if
     db_params is None.
     """
-    load_dotenv()
-    db_params = dict(
-        dbname=os.getenv("DB_NAME"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"), 
-        host="/var/run/postgresql"
-    )
+    db_params = make_db_params()
     if db_params is not None:
         if n_workers is None:
             n_workers = max(1, mp.cpu_count() - 1)
@@ -369,18 +481,17 @@ def estimateWorkloadCostForConfig(conn, W, configuration):
 if __name__ == "__main__":
     # Example usage:
     #
-    # db_params = dict(
-    #     dbname="your_db",
-    #     user="your_user",
-    #     password="your_password",
-    #     host="/var/run/postgresql",   # unix socket - faster than TCP loopback
-    # )
+    # db_params = make_db_params()
     # conn = psycopg2.connect(**db_params)
     # conn.autocommit = True
     #
+    # # Parallel batch evaluation (cs_greedy / cs_drop style):
+    # with parallel_cost_evaluator(db_params, W, n_workers=8) as pce:
+    #     results = pce.batch_cost([frozenset(...), frozenset(...)])
+    #
+    # # Full ConfigEnumeration-style parallel cost:
     # cost_init, cost_final = estimateWorkloadCost(
     #     conn, W, configurations, indexSet,
-    #     db_params=db_params,   # enables parallel cost_final
-    #     n_workers=8,           # tune to your core count (nproc)
+    #     n_workers=8,
     # )
     pass

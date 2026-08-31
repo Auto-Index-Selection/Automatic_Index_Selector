@@ -1,56 +1,134 @@
 from typing import *
-import sqlglot
-from auto_index_selector.CostEstimator.costEstimator import *
+import sqlglot as sg
+from ordered_set import OrderedSet
+from auto_index_selector.CostEstimator.costEstimator import estimateConfigurationCost
 from itertools import combinations
 
 
 # ---------------------------------------------------------------------------
-# Query / schema parsing helpers
+# Query / schema parsing helpers (consistent with cg_dta & cg_rule_based)
 # ---------------------------------------------------------------------------
 
-def getTablesIn(query: str) -> List:
-    """Return the list of sqlglot Table expressions referenced by `query`."""
-    parsedQuery = sqlglot.parse_one(query, read='postgres')
-    return list(parsedQuery.find_all(sqlglot.exp.Table))
+def normalizeColumn(column: str, schema: Dict) -> str:
+    """
+    Input:
+        column : string
+        schema : Dict
+    Output:
+        result : table.column (empty string if not found)
+    """
+    result = ""
+    col_lower = column.lower()
+    for table, attrs in schema.items():
+        attr_map = {k.lower(): k for k in attrs.keys()}
+        if col_lower in attr_map:
+            result = f"{table}.{attr_map[col_lower]}"
+            break
+    return result
 
 
-def singleIndexableColumnsIn(query: str, schema: Dict) -> List:
+def getJoinCols(q: str, schema: Dict) -> OrderedSet:
+    result = OrderedSet()
+    try:
+        parsed_query = sg.parse_one(q, read="postgres")
+    except Exception:
+        try:
+            parsed_query = sg.parse_one(q)
+        except Exception:
+            return result
+
+    for joins in parsed_query.find_all(sg.exp.Join):
+        on_clause = joins.args.get("on")
+        if on_clause:
+            for column in on_clause.find_all(sg.exp.Column):
+                normalized_col = normalizeColumn(column.name, schema)
+                if normalized_col:
+                    result.add(normalized_col)
+    return result
+
+
+def getEqCols(q: str, schema: Dict) -> OrderedSet:
+    result = OrderedSet()
+    try:
+        parsed_query = sg.parse_one(q, read="postgres")
+    except Exception:
+        try:
+            parsed_query = sg.parse_one(q)
+        except Exception:
+            return result
+
+    for where in parsed_query.find_all(sg.exp.Where):
+        if where:
+            for eq in where.find_all(sg.exp.EQ):
+                for column in eq.find_all(sg.exp.Column):
+                    normalized_col = normalizeColumn(column.name, schema)
+                    if normalized_col:
+                        result.add(normalized_col)
+    return result
+
+
+def getRangeCols(q: str, schema: Dict) -> OrderedSet:
+    result = OrderedSet()
+    try:
+        parsed_query = sg.parse_one(q, read="postgres")
+    except Exception:
+        try:
+            parsed_query = sg.parse_one(q)
+        except Exception:
+            return result
+
+    range_operators = (sg.exp.GT, sg.exp.GTE, sg.exp.LT, sg.exp.LTE)
+    for where in parsed_query.find_all(sg.exp.Where):
+        if where:
+            for r in where.find_all(range_operators):
+                for column in r.find_all(sg.exp.Column):
+                    normalized_col = normalizeColumn(column.name, schema)
+                    if normalized_col:
+                        result.add(normalized_col)
+    return result
+
+
+def getOCols(q: str, schema: Dict) -> OrderedSet:
+    result = OrderedSet()
+    try:
+        parsed_query = sg.parse_one(q, read="postgres")
+    except Exception:
+        try:
+            parsed_query = sg.parse_one(q)
+        except Exception:
+            return result
+
+    group_order = (sg.exp.Group, sg.exp.Order)
+    for clause in parsed_query.find_all(group_order):
+        for column in clause.find_all(sg.exp.Column):
+            normalized_col = normalizeColumn(column.name, schema)
+            if normalized_col:
+                result.add(normalized_col)
+    return result
+
+
+def singleIndexableColumnsIn(query: str, schema: Dict) -> List[str]:
     """
     Return admissible single-column indexes ('table.column' strings) for
-    `query`, restricted to columns that (a) actually appear in the query and
-    (b) exist in `schema`.
-
-    Note: for simplicity this treats *any* column referenced in the query
-    (not just WHERE/GROUP BY/ORDER BY/UPDATE-SET columns, per the paper's
-    strict definition of "indexable column" in Section 2.3) as a candidate.
-    This is a superset of the paper's definition, which is a safe
-    over-approximation -- it can only add extra candidates that Greedy will
-    then discard for lack of benefit, never miss a genuinely indexable one.
+    `query`, restricted to columns that appear in index-relevant clauses (WHERE,
+    JOIN ON, GROUP BY, ORDER BY) and exist in `schema`.
     """
-    indexable_columns = set()
-    parsedQuery = sqlglot.parse_one(query, read='postgres')
-
-    cols_in_query = {col.name for col in parsedQuery.find_all(sqlglot.exp.Column)}
-
-    for table in parsedQuery.find_all(sqlglot.exp.Table):
-        if table.name not in schema:
-            continue
-        for col in schema[table.name]:
-            if col in cols_in_query:
-                indexable_columns.add(f'{table.name}.{col}')
-
-    return list(indexable_columns)
+    cols: OrderedSet = OrderedSet()
+    cols |= getJoinCols(query, schema)
+    cols |= getEqCols(query, schema)
+    cols |= getRangeCols(query, schema)
+    cols |= getOCols(query, schema)
+    return list(cols)
 
 
 # ---------------------------------------------------------------------------
-# Configuration enumeration (Greedy(m,k), see Figure 5 of the paper)
+# Configuration enumeration (Greedy(m,k), see Figure 5 of AutoAdmin paper)
 # ---------------------------------------------------------------------------
 
-def _greedyExpand(conn, query: str, selected: List, remaining: List, k: int) -> List:
+def _greedyExpand(conn, query: str, selected: List[str], remaining: List[str], k: int) -> List[str]:
     """
-    Shared greedy-expansion step used by both the pure-greedy phase and the
-    seeded Greedy(m,k) phase: repeatedly add whichever remaining index gives
-    the largest positive benefit, until `k` indexes are selected or no
+    Shared greedy-expansion step: repeatedly add whichever remaining index gives
+    the largest positive cost reduction, until `k` indexes are selected or no
     remaining index helps.
     """
     selected = list(selected)
@@ -58,7 +136,7 @@ def _greedyExpand(conn, query: str, selected: List, remaining: List, k: int) -> 
 
     while len(selected) < k and remaining:
         best_idx = None
-        best_benefit = 0
+        best_benefit = 0.0
 
         for idx in remaining:
             test_config = selected + [idx]
@@ -78,58 +156,29 @@ def _greedyExpand(conn, query: str, selected: List, remaining: List, k: int) -> 
     return selected
 
 
-def enumerateConfigsHelperGreedy(conn, I: List, total_columns: int, W: list) -> List:
+def enumerateConfigs(conn, I: List[str], query: str) -> List[str]:
     """
-    Pure greedy phase: Greedy(0, k) with k unbounded, i.e. we keep adding
-    the single most beneficial remaining index until no index yields a
-    positive benefit. This is what `Enumerate(Ii, Wi)` reduces to when used
-    for *candidate* selection (Section 4), as opposed to *final*
-    configuration enumeration (Section 5), where a seed (m>0) and a bound
-    (k) are used.
+    Enumerate(I, Q) with no bound on configuration size -- used to find
+    the best configuration for a single query in the BEST-CONF algorithm.
     """
-    return _greedyExpand(conn, W[0], selected=[], remaining=I, k=total_columns)
+    return _greedyExpand(conn, query, selected=[], remaining=I, k=len(I))
 
 
-def enumerateConfigsHelperGreedyWithSeed(conn, I: List, total_columns: int, W: list, m: int = 2) -> List:
+def listToDict(candidateIndexes: List[str]) -> Dict[str, List[List[str]]]:
     """
-    Full Greedy(m, k): exhaustive search over an m-index seed, followed by
-    greedy expansion. The paper found m=2 to work very well for *final*
-    configuration enumeration (Section 7.4, step 2). Not used for candidate
-    selection itself -- kept here for the later enumeration stage.
+    Turn a list of 'table.column' strings into {table: [[column], ...]}.
+    Matches the candidate_dict structure used across all CG modules.
     """
-    query = W[0]
-    selected: List = []
-    remaining = list(I)
-
-    if m > 0 and len(I) >= m:
-        best_seed_cost = float('inf')
-        best_seed: List = []
-
-        for combo in combinations(range(len(I)), m):
-            seed = [I[i] for i in combo]
-            _, cost_fin = estimateConfigurationCost(conn, query, seed)
-            if cost_fin < best_seed_cost:
-                best_seed_cost = cost_fin
-                best_seed = seed
-
-        selected = best_seed
-        remaining = [idx for idx in I if idx not in selected]
-
-    return _greedyExpand(conn, query, selected, remaining, k=total_columns)
-
-
-def enumerateConfigs(conn, I: List, W: List) -> List:
-    """Enumerate(I, W) with no bound on configuration size -- used to find
-    the best configuration for a single query in the BEST-CONF algorithm."""
-    return enumerateConfigsHelperGreedy(conn, I, total_columns=len(I), W=W)
-
-
-def listToDict(candidateIndexes: List) -> Dict:
-    """Turn a flat list of 'table.column' strings into {table: [columns]}."""
-    result: Dict[str, List[str]] = {}
+    result: Dict[str, List[List[str]]] = {}
     for index in candidateIndexes:
         table, column = index.split('.', 1)
-        result.setdefault(table, []).append(column)
+        if column.startswith('[') and column.endswith(']'):
+            column = column[1:-1]
+        cols = [c.strip() for c in column.split(',')]
+        if table not in result:
+            result[table] = []
+        if cols not in result[table]:
+            result[table].append(cols)
     return result
 
 
@@ -137,58 +186,45 @@ def listToDict(candidateIndexes: List) -> Dict:
 # Candidate index selection (BEST-CONF, Section 4 / Figure 4)
 # ---------------------------------------------------------------------------
 
-def bestConf(conn, W: List, schema: Dict, max_per_query: Optional[int] = None) -> Dict:
+def bestConf(conn, W: List, schema: Dict, max_per_query: Optional[int] = None) -> Dict[str, List[List[str]]]:
     """
     Query-specific-best-configuration candidate index selection algorithm
-    (Figure 4).
+    (Chaudhuri & Narasayya 1997, Figure 4).
 
     Input:
-        W          -> workload, a list of SQL query strings
-        schema     -> {table: [columns]}
-        max_per_query -> optional cap on how many candidate indexes to keep
-                         per query. None reproduces BEST-CONF exactly
-                         (unbounded, as in the paper). Passing 1 or 2
-                         reproduces the BEST-CONF-1 / BEST-CONF-2 variants
-                         discussed in Section 7.3.1, which the paper found
-                         to noticeably hurt quality relative to unbounded
-                         BEST-CONF -- kept here mainly for experimentation.
+        W             -> workload, a list of SQL query strings (or query objects)
+        schema        -> {table: {col: type, ...}}
+        max_per_query -> optional cap on how many candidate indexes to keep per query.
 
     Returns:
-        candidateIndexes -> {table: [candidate columns]}
+        candidateIndexes -> {table: [[column], ...]}
     """
-    candidateIndexes: Set[str] = set()
+    candidateIndexes: OrderedSet = OrderedSet()
 
-    for query in W:
-        I = singleIndexableColumnsIn(query, schema)
-        bestIndexesForQuery = enumerateConfigs(conn, I, [query])
+    for q in W:
+        query_sql = getattr(q, "query", q)
+        I = singleIndexableColumnsIn(query_sql, schema)
+        if not I:
+            continue
+        bestIndexesForQuery = enumerateConfigs(conn, I, query_sql)
 
         if max_per_query is not None:
             bestIndexesForQuery = bestIndexesForQuery[:max_per_query]
 
-        candidateIndexes |= set(bestIndexesForQuery)
+        for idx in bestIndexesForQuery:
+            candidateIndexes.add(idx)
 
     return listToDict(list(candidateIndexes))
 
 
-def admissibleIndexes(W: List, schema: Dict) -> Dict:
+def generateCandidateIndexes(conn, W: List, schema: Dict) -> Dict[str, List[List[str]]]:
     """
-    The *un*-pruned baseline: every admissible single-column index for the
-    workload (Section 2.3), with no BEST-CONF filtering. Useful as the
-    "MJ"/"baseline" comparison point from Section 7.3.1 / Table 4 -- i.e.
-    to measure how much BEST-CONF actually prunes for a given workload.
-    """
-    admissible: Set[str] = set()
-    for query in W:
-        admissible |= set(singleIndexableColumnsIn(query, schema))
-    return listToDict(list(admissible))
-
-
-def generateCandidateIndexes(conn, W: List, schema: Dict) -> Dict:
-    '''
     Input : 
-        W -> workload as a List
-        schema -> dict
+        conn   -> database connection
+        W      -> workload as a List of queries
+        schema -> dict {table: {col: type}}
     Return :
-        candidateIndexes -> Candidate Indexes as dict {table: candidates}
-    '''
+        candidateIndexes -> Candidate Indexes as dict {table: [[col], ...]}
+    """
+    print("AutoAdmin")
     return bestConf(conn, W, schema)

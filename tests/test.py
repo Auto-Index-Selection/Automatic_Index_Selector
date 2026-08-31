@@ -7,8 +7,16 @@ from dotenv import load_dotenv
 import os
 from pyprojroot import here
 print("Current working directory:", here())
-CG = ['cg_dta', 'cg_rule_based', 'cg_extend']
-CS = ['cs_extend', 'cs_greedy', 'cs_drop']
+CG = [
+    #  'cg_dta', 
+    #  'cg_rule_based', 
+     'cg_extend'
+     ]
+CS = [
+     'cs_extend', 
+# 'cs_greedy',
+#  'cs_drop'
+ ]
 W = [
         # 'tpchWorkload',
         # 'tpcdsWorkload',
@@ -34,10 +42,10 @@ def test():
                 cg_module = importlib.import_module(f"auto_index_selector.CandidateGeneration.{cg}")
                 candidate_indexes = cg_module.generateCandidateIndexes(conn, w, schema)
                 for cs in CS:
-                    if( (cs=='cs_extend' and cg!='cg_extend') or (cs!='cs_extend' and cg=='cg_extend') ):
-                        continue
+                    # if( (cs=='cs_extend' and cg!='cg_extend') or (cs!='cs_extend' and cg=='cg_extend') ):
+                    #     continue
                     print(f"Running test_strategy with cg={cg}, cs={cs}, w_name={w_name}")
-                    test_strategy(conn, cg, cs, w_name, w, candidate_indexes)
+                    test_strategy(conn, cg, cs, w_name, w, candidate_indexes, db_name=DB_NAME)
 
 def plot():
     pass
