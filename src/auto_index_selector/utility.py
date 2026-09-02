@@ -38,7 +38,7 @@ def generate_delete_index_sql(
     config, output_path: Path = DEFAULT_DELETE_INDEX_PATH
 ) -> Path:
     """
-    Write one `drop index <name>;` statement per index in `config`,
+    Write one `drop index if exists <name>;` statement per index in `config`,
     computing each index's default Postgres name via index_name() so
     this file undoes exactly what generate_create_index_sql() created.
  
@@ -47,7 +47,7 @@ def generate_delete_index_sql(
     `cs_module.greedyMK(...)`.
     """
     lines = [
-        f"drop index {index_name(table, columns)};"
+        f"drop index if exists {index_name(table, columns)};"
         for table, columns in sorted(config)
     ]
     output_path.write_text("\n".join(lines) + ("\n" if lines else ""))

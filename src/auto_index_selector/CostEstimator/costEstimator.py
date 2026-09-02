@@ -240,9 +240,16 @@ def _eval_config_for_greedy(args):
     """
     Evaluate the total workload cost for ONE frozenset configuration.
     Returns (config_key, total_cost).
+
+    DISCARD PLANS is issued before each evaluation so the optimizer never
+    reuses a plan that was cached under a different hypothetical-index state.
+    Without this, costs for queries that were already planned can be wrong.
     """
     config_key, W = args
     conn = _worker_conn
+    # Flush plan cache — must come before resetting hypopg indexes.
+    with conn.cursor() as cur:
+        cur.execute("DISCARD PLANS;")
     clearHypotheticalIndexes(conn)
     if config_key:
         createCompositeHypoIndexes(conn, config_key)

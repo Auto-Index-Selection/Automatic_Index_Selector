@@ -62,9 +62,12 @@ def _greedy_inner(pce, candidate_indexes, cost_cache, m, k, verbose=False):
     # --- Step 2: greedily extend S one index at a time ---
     remaining = [idx for idx in candidate_indexes if idx not in S]
 
-    while len(S) < k and remaining:
-        current_cost = cost(S)
+    # current_cost for the first iteration is the seed cost already in cache.
+    # After each step the winner's cost becomes current_cost for the next step,
+    # so we never need to re-evaluate cost(S) at the top of the loop.
+    current_cost = cost(S)
 
+    while len(S) < k and remaining:
         trials = {S | {I}: I for I in remaining}
         results = batch_cost_cached(list(trials.keys()))
 
@@ -82,6 +85,8 @@ def _greedy_inner(pce, candidate_indexes, cost_cache, m, k, verbose=False):
 
         S = S | {best_index}
         remaining.remove(best_index)
+        # The winning trial cost IS cost(new S) — carry it forward.
+        current_cost = best_extended_cost
 
     return S
 
@@ -173,9 +178,13 @@ def selectConfigurations(conn, W, candidate_dict, k_list: List[int], m: int = 2,
             if k_val <= len(S):
                 configs[k_val] = S
 
-        # Greedy expansion up to max_k
+        # Greedy expansion up to max_k.
+        # current_cost for the first iteration is the seed cost already in cache.
+        # After each step the winner's cost becomes current_cost for the next step,
+        # so we never need to re-evaluate cost(S) at the top of the loop.
+        current_cost = cost(S)
+
         while len(S) < max_k and remaining:
-            current_cost = cost(S)
             trials = {S | {I}: I for I in remaining}
             results = batch_cost_cached(list(trials.keys()))
 
@@ -194,6 +203,8 @@ def selectConfigurations(conn, W, candidate_dict, k_list: List[int], m: int = 2,
 
             S = S | {best_index}
             remaining.remove(best_index)
+            # The winning trial cost IS cost(new S) — carry it forward.
+            current_cost = best_extended_cost
 
             if len(S) in sorted_k:
                 configs[len(S)] = S

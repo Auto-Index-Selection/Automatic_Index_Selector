@@ -241,8 +241,11 @@ def _drop_inner(pce, W, candidate_indexes, size_cache, cost_cache,
               f"budget={mb(storage_budget):,.1f} MB  cost={cost(S):,.2f}")
 
     # --- Step 2: forced reduction until we fit in the storage budget ---------
+    # current_cost after each forced drop is the winning trial cost — carry it
+    # forward to avoid a redundant cache lookup at the top of each iteration.
+    current_cost = cost(S)
+
     while size(S) > storage_budget:
-        current_cost = cost(S)
         current_size = size(S)
 
         trials = {}
@@ -260,12 +263,14 @@ def _drop_inner(pce, W, candidate_indexes, size_cache, cost_cache,
         results = batch_cost_cached(list(trials.keys()))
 
         best_config = None
+        best_cost = float("inf")
         best_ratio = float("inf")
         for trial, trial_cost in results.items():
             bytes_freed = trials[trial]
             ratio = (trial_cost - current_cost) / bytes_freed
             if ratio < best_ratio:
                 best_ratio = ratio
+                best_cost = trial_cost
                 best_config = trial
 
         if best_config is None:
@@ -273,17 +278,23 @@ def _drop_inner(pce, W, candidate_indexes, size_cache, cost_cache,
 
         removed = sorted(S - best_config)
         S = best_config
+        # The winning trial cost IS cost(new S) — carry it forward.
+        current_cost = best_cost
         if verbose:
             print(f"    [budget] drop {removed} -> |S|={len(S)}  "
-                  f"size={mb(size(S)):,.1f} MB  cost={cost(S):,.2f}")
+                  f"size={mb(size(S)):,.1f} MB  cost={current_cost:,.2f}")
 
     # --- Step 3: keep dropping while it genuinely reduces cost ---------------
+    # current_cost is already known from Step 2 (or the initial cost(S) call).
+    # After each successful drop the winner's cost becomes current_cost for the
+    # next iteration — no redundant cache lookup needed at the top of the loop.
     for group_size in range(1, eff_max_group + 1):
+        # Reset current_cost for each group-size pass: S may not have changed
+        # since the last pass (previous group_size found no improvement), but
+        # current_cost is still valid from Step 2 / previous pass.
         while True:
             if len(S) < group_size:
                 break
-
-            current_cost = cost(S)
 
             trial_to_group = {
                 S - frozenset(group): group
@@ -306,9 +317,11 @@ def _drop_inner(pce, W, candidate_indexes, size_cache, cost_cache,
 
             removed = sorted(S - best_config)
             S = best_config
+            # The winning trial cost IS cost(new S) — carry it forward.
+            current_cost = best_cost
             if verbose:
                 print(f"    drop {removed} -> |S|={len(S)}  "
-                      f"size={mb(size(S)):,.1f} MB  cost={best_cost:,.2f}")
+                      f"size={mb(size(S)):,.1f} MB  cost={current_cost:,.2f}")
 
     if verbose:
         final_cost = cost_cache.get(frozenset(S), float('nan'))
@@ -370,13 +383,22 @@ def selectConfigurations(conn, W, candidate_dict, storage_budgets_mb,
 
     configs = {}
     with parallel_cost_evaluator(db_params, W, n_workers=n_workers) as pce:
+        # Warm-start: begin each budget from the previous (larger) budget's
+        # result. The tighter budget's starting set is already small and its
+        # subsets are largely already in cost_cache, so Step 2 (forced
+        # reduction) and Step 3 (voluntary improvement) both hit cache far
+        # more often than starting from the full candidate set every time.
+        current_start = candidate_indexes  # full set for the first (largest) budget
         for budget in budgets_bytes:
             if verbose:
                 print(f"\n=== DROP  budget={budget / (1024**2):,.0f} MB ===")
-            configs[budget] = _drop_inner(
-                pce, W, candidate_indexes, size_cache, cost_cache,
+            result = _drop_inner(
+                pce, W, current_start, size_cache, cost_cache,
                 budget, max_group, verbose
             )
+            configs[budget] = result
+            # Next (tighter) budget warm-starts from this result.
+            current_start = list(result)
 
     return configs
 
