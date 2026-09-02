@@ -17,7 +17,7 @@ from tests.plot_results import (
     RESULTS_DIR,
 )
 CG = [
-     'cg_dta', 
+    #  'cg_dta', 
      'cg_rule_based', 
      'cg_extend'
      ]
@@ -86,7 +86,7 @@ def plot():
 
 def main():
     test()
-    # plot()    
+    plot()    
 
 if __name__ == '__main__':
     sys.exit(main())

@@ -262,20 +262,20 @@ def test_strategy(conn, cg, cs, w_name, w, candidate_indexes, db_name=None):
             create_path = Path(str(here() / 'indexes' / f'{w_name}_{cg}_{cs}_{storage}_create.sql'))
             delete_path = Path(str(here() / 'indexes' / f'{w_name}_{cg}_{cs}_{storage}_delete.sql'))
 
-            # execute_sql_file(conn, create_path)
-            # print(f"Created indexes from {create_path}")
+            execute_sql_file(conn, create_path)
+            print(f"Created indexes from {create_path}")
 
-            # # Flush cached query plans so the planner picks up the new indexes.
-            # with conn.cursor() as cur:
-            #     cur.execute("DISCARD PLANS;")
-            # conn.commit()
+            # Flush cached query plans so the planner picks up the new indexes.
+            with conn.cursor() as cur:
+                cur.execute("DISCARD PLANS;")
+            conn.commit()
 
-            # row = exp_run(conn, cg, cs, w, w_name, key_col="storage_mb", key_val=storage)
-            # total_rows.append(row)
-            # print("Experiment done")
+            row = exp_run(conn, cg, cs, w, w_name, key_col="storage_mb", key_val=storage)
+            total_rows.append(row)
+            print("Experiment done")
 
-            # execute_sql_file(conn, delete_path)
-            # print(f"Dropped indexes using {delete_path}")
+            execute_sql_file(conn, delete_path)
+            print(f"Dropped indexes using {delete_path}")
 
         # Write one consolidated total CSV for this (cg, cs, workload) run.
         total_csv_path = write_total_timings_csv(
@@ -300,20 +300,20 @@ def test_strategy(conn, cg, cs, w_name, w, candidate_indexes, db_name=None):
             create_path = generate_create_index_sql(config, Path(str(here() / 'indexes' / f'{w_name}_{cg}_{cs}_{k}_{2}_create.sql')))
             delete_path = generate_delete_index_sql(config, Path(str(here() / 'indexes' / f'{w_name}_{cg}_{cs}_{k}_{2}_delete.sql')))
 
-            # execute_sql_file(conn, create_path)
-            # print(f"Created indexes from {create_path}")
+            execute_sql_file(conn, create_path)
+            print(f"Created indexes from {create_path}")
 
-            # # Flush cached query plans so the planner picks up the new indexes.
-            # with conn.cursor() as cur:
-            #     cur.execute("DISCARD PLANS;")
-            # conn.commit()
+            # Flush cached query plans so the planner picks up the new indexes.
+            with conn.cursor() as cur:
+                cur.execute("DISCARD PLANS;")
+            conn.commit()
 
-            # row = exp_run(conn, cg, cs, w, w_name, key_col="k", key_val=k)
-            # total_rows.append(row)
-            # print("Experiment done")
+            row = exp_run(conn, cg, cs, w, w_name, key_col="k", key_val=k)
+            total_rows.append(row)
+            print("Experiment done")
 
-            # execute_sql_file(conn, delete_path)
-            # print(f"Dropped indexes using {delete_path}")
+            execute_sql_file(conn, delete_path)
+            print(f"Dropped indexes using {delete_path}")
 
         # Write one consolidated total CSV for this (cg, cs, workload) run.
         total_csv_path = write_total_timings_csv(
