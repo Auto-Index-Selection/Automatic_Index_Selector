@@ -5,6 +5,17 @@
 # auto_index_selector pipeline. `__main__.py` dynamically imports the chosen
 # modules at runtime.
 # ==============================================================================
+# 0. DATABASE CONNECTION SETTINGS
+# ==============================================================================
+[database]
+# PostgreSQL connection parameters.
+# Any parameter left empty ("") or omitted will fall back to .env (DB_HOST, DB_USER, etc.)
+host = "localhost"
+port = 5432
+user = "postgres"
+password = "123"
+dbname = "tpch_db"
+
 
 # ------------------------------------------------------------------------------
 # 1. CANDIDATE GENERATION STAGE
@@ -59,11 +70,18 @@ storage_budget = "inf"
 #                        (Captures real queries executed by external applications/benchmarks)
 #   - "custom"         : Executes queries using the unified workload runner in
 #                        `src/auto_index_selector/workload_runner/`.
-#                        (Configured via src/auto_index_selector/workload_runner/config.toml)
 mode = "custom"
 
-# Database name to connect to (leave empty "" to use database from workload_runner or .env)
-db_name = ""
+# Workload to execute when mode = "custom":
+#   - Bundled benchmarks: "tpch" or "pgbench"
+#   - Or a path to a directory containing .sql queries
+queries_path = "tpch"
+
+# Number of execution iterations (rounds) for mode = "custom"
+iterations = 5
+
+# Whether to execute companion DML writes to generate write penalty statistics
+execute_dml = true
 
 # Duration in seconds to monitor live traffic when mode = "timer" / "live"
 timer_seconds = 60

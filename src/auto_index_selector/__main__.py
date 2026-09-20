@@ -171,31 +171,23 @@ def _merge_config(config_override: Optional[dict] = None) -> dict:
 
 
 def _connect_from_env(cfg: Optional[dict] = None):
-    """Open a connection from config / .env settings."""
+    """Open a connection from config [database] or .env settings."""
     load_dotenv()
 
-    dbname = None
-    if cfg:
-        workload_cfg = cfg.get("workload", {})
-        database_cfg = cfg.get("database", {})
-        dbname = database_cfg.get("dbname") or workload_cfg.get("db_name")
-        if not dbname and workload_cfg.get("mode", "").lower() == "custom":
-            try:
-                from auto_index_selector.workload_runner import load_runner_config
-                runner_cfg = load_runner_config()
-                dbname = runner_cfg.get("database")
-            except Exception:
-                pass
+    db_cfg = cfg.get("database", {}) if cfg else {}
 
-    if not dbname:
-        dbname = os.getenv("DB_NAME", "postgres")
+    dbname = db_cfg.get("dbname") or os.getenv("DB_NAME", "postgres")
+    user = db_cfg.get("user") or os.getenv("DB_USER", "postgres")
+    password = db_cfg.get("password") or os.getenv("DB_PASSWORD", "")
+    host = db_cfg.get("host") or os.getenv("DB_HOST", "localhost")
+    port = str(db_cfg.get("port") or os.getenv("DB_PORT", "5432"))
 
     return psycopg2.connect(
         dbname=dbname,
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        host=os.getenv("DB_HOST"),
-        port=os.getenv("DB_PORT"),
+        user=user,
+        password=password,
+        host=host,
+        port=port,
     )
 
 
@@ -316,7 +308,7 @@ def observe_workload(
         from auto_index_selector.workload_runner import WorkloadRunner
         if verbose:
             print("[Observer] Executing workload_runner...")
-        runner = WorkloadRunner()
+        runner = WorkloadRunner(config_dict=workload_cfg)
         runner.run(conn)
     else:
         raise ValueError(

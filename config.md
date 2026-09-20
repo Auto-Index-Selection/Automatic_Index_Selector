@@ -32,6 +32,17 @@ Every candidate generator can be paired with any configuration selector:
 
 ## 3. Parameter Reference
 
+### `[database]`
+| Parameter | Type | Default | Description |
+|:---|:---:|:---:|:---|
+| `host` | `string` | `"localhost"` | PostgreSQL server hostname / IP address. Falls back to `DB_HOST` in `.env` if omitted. |
+| `port` | `integer` | `5432` | PostgreSQL server port. Falls back to `DB_PORT` in `.env` if omitted. |
+| `user` | `string` | `"postgres"` | Database username. Falls back to `DB_USER` in `.env` if omitted. |
+| `password` | `string` | `""` | Database password. Falls back to `DB_PASSWORD` in `.env` if omitted. |
+| `dbname` | `string` | `"tpch_db"` | Target database name to connect and run against. Falls back to `DB_NAME` in `.env` if omitted. |
+
+---
+
 ### `[candidate_generation]`
 | Parameter | Type | Default | Description |
 |:---|:---:|:---:|:---|
@@ -53,12 +64,12 @@ Every candidate generator can be paired with any configuration selector:
 | Parameter | Type | Default | Description |
 |:---|:---:|:---:|:---|
 | `mode` | `string` | `"custom"` | Pluggable workload observation mode: `"timer"` / `"live"` (passively monitors live traffic for `timer_seconds`), or `"custom"` (executes queries via `src/auto_index_selector/workload_runner/`). |
-| `db_name` | `string` | `""` | Database name to connect to (e.g. `"tpch_db"`, `"tpcc_db"`). Leave empty `""` to use database configured in `workload_runner/config.toml` or `DB_NAME` from `.env`. |
-| `timer_seconds` | `integer` | `60` | Duration to monitor live traffic when `mode = "timer"`. |
+| `database` | `string` | `"tpch_db"` | Target database name to connect and run against (falls back to `DB_NAME` in `.env` if omitted). |
+| `queries_path` | `string` | `"tpch"` | Workload queries to run when `mode = "custom"` (`"tpch"`, `"pgbench"`, or directory path). |
+| `iterations` | `integer` | `5` | Number of continuous execution iterations/rounds when `mode = "custom"`. |
+| `execute_dml` | `boolean` | `true` | When true, executes companion DML statements to drive write penalty statistics. |
+| `timer_seconds` | `integer` | `60` | Duration in seconds to monitor live traffic when `mode = "timer"`. |
 | `log_file` | `string` | `"auto"` | Path to `query_logger.log` or `"auto"` to auto-detect from PostgreSQL catalog. |
-
-> [!NOTE]
-> When `mode = "custom"`, the workload queries, database, number of iterations, and companion DML execution are configured in **`src/auto_index_selector/workload_runner/config.toml`**.
 
 
 ---

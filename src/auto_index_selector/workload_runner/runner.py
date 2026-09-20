@@ -96,14 +96,14 @@ class WorkloadRunner:
         return reads, dml
 
     def _connect(self):
-        """Create a dedicated connection using .env credentials and configured database."""
+        """Create a dedicated connection using config or .env credentials."""
         load_dotenv()
         return psycopg2.connect(
             dbname=self.database,
-            user=os.getenv("DB_USER", "postgres"),
-            password=os.getenv("DB_PASSWORD", ""),
-            host=os.getenv("DB_HOST", "localhost"),
-            port=os.getenv("DB_PORT", "5432"),
+            user=self.config.get("user") or os.getenv("DB_USER", "postgres"),
+            password=self.config.get("password") or os.getenv("DB_PASSWORD", ""),
+            host=self.config.get("host") or os.getenv("DB_HOST", "localhost"),
+            port=str(self.config.get("port") or os.getenv("DB_PORT", "5432")),
         )
 
     def run(self, conn=None) -> Dict[str, Any]:

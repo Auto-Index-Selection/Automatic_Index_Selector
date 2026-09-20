@@ -91,3 +91,35 @@ def test_runner_execution_with_mock_conn():
     assert stats["executed_reads"] == 20  # 10 queries * 2 rounds
     assert stats["executed_dml"] == 8    # 4 dml * 2 rounds
     assert mock_conn.committed is True
+
+
+def test_connect_from_env_reads_database_config(monkeypatch):
+    from auto_index_selector.__main__ import _connect_from_env
+
+    captured_kwargs = {}
+
+    def mock_connect(**kwargs):
+        captured_kwargs.update(kwargs)
+        class _DummyConn:
+            def close(self): pass
+        return _DummyConn()
+
+    monkeypatch.setattr("psycopg2.connect", mock_connect)
+
+    cfg = {
+        "database": {
+            "host": "custom-host",
+            "port": 5433,
+            "user": "custom-user",
+            "password": "secret-password",
+            "dbname": "custom_db",
+        }
+    }
+    _connect_from_env(cfg)
+
+    assert captured_kwargs["host"] == "custom-host"
+    assert captured_kwargs["port"] == "5433"
+    assert captured_kwargs["user"] == "custom-user"
+    assert captured_kwargs["password"] == "secret-password"
+    assert captured_kwargs["dbname"] == "custom_db"
+
