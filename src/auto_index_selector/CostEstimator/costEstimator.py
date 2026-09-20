@@ -2,29 +2,80 @@
 CostEstimator/costEstimator.py
 ------------------------------
 Core cost estimation module using HypoPG and the PostgreSQL optimizer.
+Supports parameterized queries via psycopg2 argument passing.
 """
 
 import logging
-import psycopg2
+import re
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-def clearHypotheticalIndexes(conn):
+def clearHypotheticalIndexes(conn) -> None:
     """Remove all HypoPG hypothetical indexes."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT hypopg_reset();")
+    if conn is None:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT hypopg_reset();")
+    except Exception:
+        if conn:
+            conn.rollback()
+
+
+def prepare_explain_query(query: str, params: Optional[Sequence[Any]] = None) -> Tuple[str, Tuple[Any, ...]]:
+    """
+    Format a query for EXPLAIN (FORMAT JSON) execution.
+
+    If params are provided (e.g. from query_logger), replaces $1, $2, ...
+    with %s and escapes existing % characters so psycopg2 safely binds
+    the runtime values into the query plan.
+    """
+    if not params:
+        return f"EXPLAIN (FORMAT JSON) {query}", ()
+
+    param_map: Dict[int, Any] = {}
+    for idx, p in enumerate(params, start=1):
+        if hasattr(p, "position") and hasattr(p, "value"):
+            param_map[p.position] = p.value
+        elif isinstance(p, dict):
+            pos = p.get("position", p.get("param", idx))
+            val = p.get("value", p.get("val"))
+            param_map[pos] = val
+        else:
+            param_map[idx] = p
+
+    # Escape existing % to %% so psycopg2 parameter interpolation does not fail
+    escaped_query = query.replace("%", "%%")
+
+    # Replace $N with %s and collect matching values in order
+    positions: List[int] = []
+    converted_query = re.sub(
+        r"\$(\d+)",
+        lambda m: (positions.append(int(m.group(1))), "%s")[1],
+        escaped_query,
+    )
+
+    values = tuple(param_map.get(pos, None) for pos in positions)
+    return f"EXPLAIN (FORMAT JSON) {converted_query}", values
 
 
 def getQueryCost(conn, query: str, fallback_cost: float = 1e9) -> float:
     """
     Returns PostgreSQL optimizer cost via EXPLAIN (FORMAT JSON).
+    Supports parameterized queries (with attached .params or $N placeholders).
     If a query fails or times out, safely rolls back and returns fallback_cost.
     """
-    explain_query = f"EXPLAIN (FORMAT JSON) {query}"
+    params = getattr(query, "params", None)
+    explain_sql, param_values = prepare_explain_query(query, params)
+
     try:
         with conn.cursor() as cur:
-            cur.execute(explain_query)
+            if param_values:
+                cur.execute(explain_sql, param_values)
+            else:
+                cur.execute(explain_sql)
             result = cur.fetchone()
             if result and result[0]:
                 return float(result[0][0]["Plan"]["Total Cost"])
@@ -37,7 +88,7 @@ def getQueryCost(conn, query: str, fallback_cost: float = 1e9) -> float:
     return fallback_cost
 
 
-def createCompositeHypoIndexes(conn, configuration):
+def createCompositeHypoIndexes(conn, configuration: Iterable[Tuple[str, Iterable[str]]]) -> None:
     """Create HypoPG hypothetical indexes for a list of (table, (columns...)) tuples."""
     with conn.cursor() as cur:
         for table, cols in configuration:
@@ -46,7 +97,7 @@ def createCompositeHypoIndexes(conn, configuration):
             cur.execute("SELECT * FROM hypopg_create_index(%s);", (stmt,))
 
 
-def createHypoIndexesCS(conn, configuration):
+def createHypoIndexesCS(conn, configuration: Iterable[str]) -> None:
     """Create HypoPG hypothetical indexes for a list of 'table.column' strings."""
     with conn.cursor() as cur:
         for index in configuration:
@@ -54,7 +105,7 @@ def createHypoIndexesCS(conn, configuration):
             cur.execute("SELECT * FROM hypopg_create_index(%s);", (f"CREATE INDEX ON {table}({column})",))
 
 
-def estimateConfigurationCost(conn, query: str, configuration):
+def estimateConfigurationCost(conn, query: str, configuration: Iterable[str]) -> Tuple[float, float]:
     """
     Estimates initial vs hypothetical cost for a single query under a 'table.column' configuration.
     Used by candidate generation (cg_auto_admin).
@@ -67,14 +118,20 @@ def estimateConfigurationCost(conn, query: str, configuration):
     return cost_init, cost_fin
 
 
-def estimateWorkloadCostForConfig(conn, W, configuration, query_weights=None, write_penalties=None) -> float:
+def estimateWorkloadCostForConfig(
+    conn,
+    W: List[Any],
+    configuration: Iterable[Tuple[str, Tuple[str, ...]]],
+    query_weights: Optional[Dict[str, float]] = None,
+    write_penalties: Optional[Callable[[str, Tuple[str, ...]], float]] = None,
+) -> float:
     """
     Computes total hypothetical workload execution cost (Read Cost + Write Penalty) for a configuration.
 
     Parameters
     ----------
     conn            : psycopg2 connection
-    W               : list of SQL queries
+    W               : list of SQL queries (or CapturedQuery objects with .params)
     configuration   : iterable of (table, (col1, col2, ...)) indexes
     query_weights   : dict, optional ({query: call_frequency})
     write_penalties : callable, optional ((table, columns) -> penalty float)

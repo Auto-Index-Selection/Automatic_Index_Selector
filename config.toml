@@ -35,7 +35,7 @@ module = "cg_rule_based"
 #                       size estimation and storage budget constraints.
 #   - "cs_extend"     : Extend Algorithm (Schlosser et al. ICDE 2019) with
 #                       recursive index morphing (k -> k + [col]) and memory budgeting.
-module = "cs_extend"
+module = "cs_drop"
 
 # Parameters for Greedy(m, k), Whang Drop, and Extend:
 # m: Size of the exhaustively searched seed configuration (for config_sel) or
@@ -54,15 +54,23 @@ storage_budget = "inf"
 # 3. WORKLOAD INGESTION STAGE
 # ------------------------------------------------------------------------------
 [workload]
-# Available modules:
-#   - "pgStatStatementsWorkload"  : Connects to PostgreSQL's `pg_stat_statements`
-#                                  view to automatically extract real-world read
-#                                  queries executed by live applications.
-#                                  Captures execution call counts (Δcalls) to weight
-#                                  query costs proportionally.
-#                                  Includes `PlaceholderResolver` ($1, $2 -> typed literals)
-#                                  so HypoPG can plan normalized queries without errors.
-module = "pgStatStatementsWorkload"
+# Pluggable workload runner / observation mode:
+#   - "timer" / "live" : Monitors live database traffic passively for `timer_seconds`.
+#                        (Captures real queries executed by external applications/benchmarks)
+#   - "custom"         : Executes queries using the unified workload runner in
+#                        `src/auto_index_selector/workload_runner/`.
+#                        (Configured via src/auto_index_selector/workload_runner/config.toml)
+mode = "custom"
+
+# Database name to connect to (leave empty "" to use database from workload_runner or .env)
+db_name = ""
+
+# Duration in seconds to monitor live traffic when mode = "timer" / "live"
+timer_seconds = 60
+
+# Optional explicit path to query_logger.log.
+# Set to "auto" (or leave empty) to automatically resolve from PostgreSQL GUCs.
+log_file = "auto"
 
 
 # ------------------------------------------------------------------------------

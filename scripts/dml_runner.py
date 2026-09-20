@@ -25,12 +25,8 @@ import random
 import string
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
-try:
-    from pyprojroot import here
-except ImportError:
-    def here() -> Path:
-        # Fallback to repository root
-        return Path(__file__).resolve().parent.parent.parent.parent
+def here() -> Path:
+    return Path(__file__).resolve().parent.parent
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +233,7 @@ class DMLWorkloadRunner:
                     timeout_count += 1
         else:  # "random"
             for _ in range(self._rounds):
-                f = random.choice(sql_files)
+                f = self._param_gen._rng.choice(sql_files)
                 ok, timedout = self._execute_file(f)
                 if ok:
                     executed_count += 1

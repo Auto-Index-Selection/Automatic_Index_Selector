@@ -26,6 +26,7 @@ import logging
 import os
 import random
 import sys
+import time
 from pathlib import Path
 
 # Add project src to sys.path
@@ -54,6 +55,12 @@ logger = logging.getLogger("WorkloadSimulator")
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Standalone Workload Simulator for Auto Index Selector"
+    )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.0,
+        help="Initial delay in seconds before starting traffic (default: 0.0)"
     )
     parser.add_argument(
         "--rounds",
@@ -160,6 +167,11 @@ def main():
         sys.exit(1)
 
     try:
+        # 0. Initial Delay (if specified, e.g. waiting for index advisor before-snapshot)
+        if args.delay > 0:
+            logger.info("Waiting %.1fs before starting workload traffic...", args.delay)
+            time.sleep(args.delay)
+
         # 1. Execute Read Queries (populates pg_stat_statements)
         if not args.no_reads:
             reads_dir = Path(args.reads_dir)

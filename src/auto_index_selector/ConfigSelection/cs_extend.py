@@ -27,6 +27,16 @@ IndexSet = List[Index]
 CandidatePool = List[Tuple[str, str]]        # [(table, col), ...]
 
 
+def _to_float(value, default=None):
+    """Coerce a budget value to float, returning `default` when it cannot be."""
+    if value is None:
+        return default
+    try:
+        return float(value)  # float() already parses "inf" and numeric strings
+    except (TypeError, ValueError):
+        return default
+
+
 def extractCandidatePool(candidate_dict: Any) -> CandidatePool:
     """Extract unique (table, single_column) candidate attributes from candidate structure."""
     pool: List[Tuple[str, str]] = []
@@ -257,7 +267,7 @@ def extendAlgorithm(
     conn,
     W: List[str],
     candidate_dict: Any,
-    budget_mb: float = 500.0,
+    budget_mb: Optional[float] = None,
     storage_budget: Optional[float] = None,
     max_index_width: int = 3,
     min_cost_improvement: float = 1.003,
@@ -272,8 +282,18 @@ def extendAlgorithm(
     Public entry point for Extend Algorithm.
     Returns frozenset[(table, (col1, ...))] matching standard configuration format.
     """
-    if storage_budget is not None and storage_budget != float("inf"):
-        budget_mb = float(storage_budget) / (1024.0 * 1024.0)
+    # Budget precedence, matching dropHeuristic(): an explicitly supplied
+    # budget_mb wins, storage_budget (bytes) is the fallback, 500 MB is the
+    # default. Coerce before comparing -- a budget arriving as the string "inf"
+    # would otherwise fail the float("inf") test and be treated as a limit.
+    if budget_mb is not None:
+        budget_mb = _to_float(budget_mb, default=float("inf"))
+    else:
+        budget_bytes = _to_float(storage_budget, default=None)
+        if budget_bytes is None or budget_bytes == float("inf"):
+            budget_mb = float("inf") if budget_bytes == float("inf") else 500.0
+        else:
+            budget_mb = budget_bytes / (1024.0 * 1024.0)
 
     candidates = extractCandidatePool(candidate_dict)
     algo = ExtendAlgorithm(

@@ -10,7 +10,15 @@ __pycache__/
 *$py.class
 
 tests/tpcc/results/
+tests/pgbench/results/
 legacy_tests/
 tools/
 *.txt
 bug
+
+# Build & packaging artifacts
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+test.py

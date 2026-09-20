@@ -52,7 +52,14 @@ Every candidate generator can be paired with any configuration selector:
 ### `[workload]`
 | Parameter | Type | Default | Description |
 |:---|:---:|:---:|:---|
-| `module` | `string` | `"pgStatStatementsWorkload"` | Connects to PostgreSQL's `pg_stat_statements` view to extract live queries executed during the window with execution count ($\Delta\text{calls}$) weighting. |
+| `mode` | `string` | `"custom"` | Pluggable workload observation mode: `"timer"` / `"live"` (passively monitors live traffic for `timer_seconds`), or `"custom"` (executes queries via `src/auto_index_selector/workload_runner/`). |
+| `db_name` | `string` | `""` | Database name to connect to (e.g. `"tpch_db"`, `"tpcc_db"`). Leave empty `""` to use database configured in `workload_runner/config.toml` or `DB_NAME` from `.env`. |
+| `timer_seconds` | `integer` | `60` | Duration to monitor live traffic when `mode = "timer"`. |
+| `log_file` | `string` | `"auto"` | Path to `query_logger.log` or `"auto"` to auto-detect from PostgreSQL catalog. |
+
+> [!NOTE]
+> When `mode = "custom"`, the workload queries, database, number of iterations, and companion DML execution are configured in **`src/auto_index_selector/workload_runner/config.toml`**.
+
 
 ---
 
@@ -78,7 +85,7 @@ m = 2
 k = 10
 
 [workload]
-module = "pgStatStatementsWorkload"
+mode = "timer"
 
 [write_penalty]
 enabled = true
@@ -99,7 +106,7 @@ m = 2
 storage_budget = 52428800  # 50 MB in bytes
 
 [workload]
-module = "pgStatStatementsWorkload"
+mode = "timer"
 
 [write_penalty]
 enabled = true
@@ -119,7 +126,7 @@ module = "cs_extend"
 storage_budget = 104857600  # 100 MB in bytes
 
 [workload]
-module = "pgStatStatementsWorkload"
+mode = "timer"
 
 [write_penalty]
 enabled = true
@@ -140,7 +147,7 @@ m = 2
 k = 10
 
 [workload]
-module = "pgStatStatementsWorkload"
+mode = "timer"
 
 [write_penalty]
 enabled = true
@@ -161,7 +168,7 @@ m = 2
 k = 10
 
 [workload]
-module = "pgStatStatementsWorkload"
+mode = "timer"
 
 [write_penalty]
 enabled = false             # Pure read optimization ignoring database writes

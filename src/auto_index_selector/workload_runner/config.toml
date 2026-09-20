@@ -1,0 +1,19 @@
+# ==============================================================================
+# WORKLOAD RUNNER CONFIGURATION (workload_runner/config.toml)
+# ==============================================================================
+# Database to connect and run queries against
+database = "tpch_db"
+
+# Workload directory to run. Options:
+#   - Bundled workload inside workloads/: "workloads/tpch" or "workloads/pgbench"
+#   - Any relative/absolute directory path containing .sql queries
+queries_path = "workloads/tpch"
+
+# Number of continuous execution iterations/rounds
+iterations = 1
+
+# Whether to execute companion DML writes (if dml/ subfolder exists)
+execute_dml = true
+
+# Statement timeout in milliseconds (0 to disable)
+statement_timeout_ms = 30000

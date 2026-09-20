@@ -1,30 +1,40 @@
 """
 tests/tpcc/workload.py
 ----------------------
-TPC-C workload loader and simulation traffic generator for read queries
-and DML write transactions. All queries are stored as fixed, auditable
-SQL files under tests/tpcc/queries/reads/ and tests/tpcc/queries/dml/.
+TPC-C workload loader and the observation-window driver.
+
+`run_tpcc_workload` is passed to `observe_workload` as its `observation_hook`,
+replacing the default `time.sleep(window_duration_seconds)`. The AIS pipeline
+then observes a workload that was *actually executed* during the window rather
+than whatever background traffic happened to arrive — so W, the query weights
+and the write penalties are deterministic and reproducible.
+
+It opens its own connection: running workload SQL on the snapshot connection
+would let one failed statement abort the transaction the pipeline needs.
 """
 from __future__ import annotations
 
 import logging
+import os
+import random
 import re
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
+
+import psycopg2
+from dotenv import load_dotenv
+
+from .transactions import run_transaction_round
 
 logger = logging.getLogger(__name__)
 
 QUERIES_DIR = Path(__file__).resolve().parent / "queries"
 READS_DIR = QUERIES_DIR / "reads"
-DMLS_DIR = QUERIES_DIR / "dml"
 
 
 def load_tpcc_queries() -> List[Tuple[str, str]]:
-    """
-    Load all TPC-C analytical read queries from tests/tpcc/queries/reads/.
-    Returns a sorted list of (label, sql) tuples (e.g. ('T1', 'SELECT...')).
-    """
+    """Load the TPC-C read queries as sorted (label, sql) pairs."""
     if not READS_DIR.exists():
         raise FileNotFoundError(f"TPC-C reads directory not found at: {READS_DIR}")
 
@@ -32,80 +42,93 @@ def load_tpcc_queries() -> List[Tuple[str, str]]:
         m = re.search(r"t(\d+)", p.stem)
         return int(m.group(1)) if m else 0
 
-    queries: List[Tuple[str, str]] = []
-    for sql_file in sorted(READS_DIR.glob("t*.sql"), key=_num):
-        sql = sql_file.read_text().strip().rstrip(";").rstrip() + ";"
-        label = f"T{_num(sql_file)}"
-        queries.append((label, sql))
-
+    queries = [
+        (f"T{_num(f)}", f.read_text().strip().rstrip(";").rstrip() + ";")
+        for f in sorted(READS_DIR.glob("t*.sql"), key=_num)
+    ]
     if not queries:
         raise ValueError(f"No t*.sql files found in {READS_DIR}")
-
     return queries
 
 
-def load_tpcc_dml_queries() -> List[Tuple[str, str]]:
+def connect(dbname: str):
+    """Open a fresh connection to the benchmark database."""
+    load_dotenv()
+    return psycopg2.connect(
+        dbname=dbname,
+        user=os.getenv("DB_USER", "postgres"),
+        password=os.getenv("DB_PASSWORD", "postgres"),
+        host=os.getenv("DB_HOST", "localhost"),
+        port=os.getenv("DB_PORT", "5432"),
+    )
+
+
+def run_tpcc_workload(
+    dbname: str,
+    read_rounds: int = 3,
+    txn_rounds: int = 2,
+    seed: int = 42,
+    verbose: bool = True,
+) -> Dict:
     """
-    Load all fixed TPC-C DML write transactions from tests/tpcc/queries/dml/.
-    Returns a sorted list of (label, sql) tuples (e.g. ('D1', 'UPDATE...')).
+    Execute the TPC-C workload once, for one observation window.
+
+    Reads populate pg_stat_statements (giving W and the call-count weights);
+    the write transactions populate advisor_write_stats and pg_stat_user_tables
+    (giving the write penalties). Every round commits separately so one failure
+    cannot discard the window's accumulated writes.
     """
-    if not DMLS_DIR.exists():
-        raise FileNotFoundError(f"TPC-C DML directory not found at: {DMLS_DIR}")
+    queries = load_tpcc_queries()
+    rng = random.Random(seed)
+    stats = {"reads": 0, "read_failures": 0, "transactions": {}}
+    t0 = time.perf_counter()
 
-    def _num(p: Path) -> int:
-        m = re.search(r"d(\d+)", p.stem)
-        return int(m.group(1)) if m else 0
+    conn = connect(dbname)
+    try:
+        # --- Reads: one commit per round ---
+        for _ in range(read_rounds):
+            try:
+                with conn.cursor() as cur:
+                    for label, sql in queries:
+                        cur.execute(sql)
+                        if cur.description:
+                            cur.fetchall()
+                        stats["reads"] += 1
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                stats["read_failures"] += 1
+                logger.debug("Read round aborted: %s", e)
 
-    dml_queries: List[Tuple[str, str]] = []
-    for sql_file in sorted(DMLS_DIR.glob("d*.sql"), key=_num):
-        sql = sql_file.read_text().strip().rstrip(";").rstrip() + ";"
-        label = f"D{_num(sql_file)}"
-        dml_queries.append((label, sql))
+        # --- Writes: the canonical transaction mix ---
+        for _ in range(txn_rounds):
+            counts = run_transaction_round(conn, rng)
+            for name, n in counts.items():
+                stats["transactions"][name] = stats["transactions"].get(name, 0) + n
+    finally:
+        conn.close()
 
-    if not dml_queries:
-        raise ValueError(f"No d*.sql files found in {DMLS_DIR}")
+    stats["seconds"] = time.perf_counter() - t0
+    if verbose:
+        txns = ", ".join(f"{k}={v}" for k, v in sorted(stats["transactions"].items())) or "none"
+        print(f"  [Workload] Executed {stats['reads']} reads and transactions ({txns}) "
+              f"in {stats['seconds']:.1f}s")
+    return stats
 
-    return dml_queries
 
-
-def run_tpcc_traffic(conn, duration_seconds: int = 10, rounds_per_query: int = 5, dml_rounds: int = 20) -> int:
+def make_observation_hook(
+    dbname: str,
+    read_rounds: int = 3,
+    txn_rounds: int = 2,
+    seed: int = 42,
+) -> Tuple[Callable[[], None], Dict]:
     """
-    Executes fixed TPC-C analytical read queries and DML write transactions against PostgreSQL.
-    Used to populate pg_stat_statements and advisor_write_stats during observation windows.
+    Build the zero-argument callable `observe_workload` expects, plus a dict
+    that receives the execution stats once the hook has run.
     """
-    read_queries = load_tpcc_queries()
-    dml_queries = load_tpcc_dml_queries()
-    total_executed = 0
+    captured: Dict = {}
 
-    t_end = time.time() + duration_seconds
-    with conn.cursor() as cur:
-        # 1. Run read queries
-        for _ in range(rounds_per_query):
-            for label, sql in read_queries:
-                try:
-                    cur.execute(sql)
-                    if cur.description:
-                        cur.fetchall()
-                    total_executed += 1
-                except Exception as e:
-                    conn.rollback()
-                    logger.debug("Query %s execution failed: %s", label, e)
+    def _hook() -> None:
+        captured.update(run_tpcc_workload(dbname, read_rounds, txn_rounds, seed))
 
-        # 2. Run DML write transactions
-        for _ in range(dml_rounds):
-            for label, sql in dml_queries:
-                try:
-                    cur.execute(sql)
-                    total_executed += 1
-                except Exception as e:
-                    conn.rollback()
-                    logger.debug("DML %s execution failed: %s", label, e)
-
-        conn.commit()
-
-    # If duration remaining, sleep to complete observation window
-    remaining = t_end - time.time()
-    if remaining > 0:
-        time.sleep(remaining)
-
-    return total_executed
+    return _hook, captured
