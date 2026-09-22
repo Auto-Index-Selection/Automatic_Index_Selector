@@ -69,7 +69,8 @@ Every candidate generator can be paired with any configuration selector:
 | `iterations` | `integer` | `5` | Number of continuous execution iterations/rounds when `mode = "custom"`. |
 | `execute_dml` | `boolean` | `true` | When true, executes companion DML statements to drive write penalty statistics. |
 | `timer_seconds` | `integer` | `60` | Duration in seconds to monitor live traffic when `mode = "timer"`. |
-| `log_file` | `string` | `"auto"` | Path to `query_logger.log` or `"auto"` to auto-detect from PostgreSQL catalog. |
+| `log_file` | `string` | *(required)* | Path to `query_logger.log` file (e.g. `"/var/lib/postgresql/16/main/query_logger.log"`). Must be configured; if omitted or if the file does not exist at this location, an exception is raised and execution halts immediately. |
+| `workload_output` | `string` | `"workload.json"` | Destination path for the extracted workload JSON file (stores queries, parameters, weights). |
 
 
 ---

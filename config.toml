@@ -14,7 +14,7 @@ host = "localhost"
 port = 5432
 user = "postgres"
 password = "123"
-dbname = "tpch_db"
+dbname = "tpcc_db"
 
 
 # ------------------------------------------------------------------------------
@@ -75,7 +75,7 @@ mode = "custom"
 # Workload to execute when mode = "custom":
 #   - Bundled benchmarks: "tpch" or "pgbench"
 #   - Or a path to a directory containing .sql queries
-queries_path = "tpch"
+queries_path = "/home/pratik/mtp-integration/Automatic_Index_Selector/src/auto_index_selector/workload_runner/workloads/pgbench"
 
 # Number of execution iterations (rounds) for mode = "custom"
 iterations = 5
@@ -86,9 +86,12 @@ execute_dml = true
 # Duration in seconds to monitor live traffic when mode = "timer" / "live"
 timer_seconds = 60
 
-# Optional explicit path to query_logger.log.
-# Set to "auto" (or leave empty) to automatically resolve from PostgreSQL GUCs.
-log_file = "auto"
+# Path to query_logger.log file
+# If the file is not found at this location, an exception is raised and execution halts
+log_file = "/var/lib/postgresql/16/main/query_logger.log"
+
+# Path where the extracted workload (queries, parameters, weights) is saved in JSON format
+workload_output = "workload.json"
 
 
 # ------------------------------------------------------------------------------

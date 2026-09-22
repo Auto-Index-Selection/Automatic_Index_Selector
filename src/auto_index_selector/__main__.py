@@ -25,13 +25,13 @@ from dotenv import load_dotenv
 import tomllib
 
 from auto_index_selector.Workload.queryLoggerWorkload import (
-    detect_log_path,
     extract_workload,
     flush_and_wait,
     reset_stats,
     setup_query_logger,
     take_snapshot as ql_take_snapshot,
     truncate_log,
+    validate_log_path,
 )
 from auto_index_selector.CostEstimator.costEstimator import clearHypotheticalIndexes
 
@@ -191,16 +191,22 @@ def _connect_from_env(cfg: Optional[dict] = None):
     )
 
 
-def take_snapshot(conn):
+_ACTIVE_LOG_FILE: Optional[str] = None
+_ACTIVE_WORKLOAD_OUTPUT: Optional[str] = "workload.json"
+
+
+def take_snapshot(conn, log_file: Optional[str] = None):
     """Capture a snapshot of the workload capture state."""
-    log_file = detect_log_path(conn)
-    return ql_take_snapshot(conn, log_path=log_file)
+    resolved_log = log_file or _ACTIVE_LOG_FILE
+    return ql_take_snapshot(conn, log_path=resolved_log)
 
 
 def get_delta_workload(
     conn,
     snap_before,
     snap_after,
+    log_file: Optional[str] = None,
+    output_path: Optional[str] = None,
 ) -> Tuple[List[Any], Dict[str, Dict[str, str]], Dict[str, float]]:
     """Extract workload queries and weights captured between snapshots."""
     start_offset = getattr(snap_before, "file_offset", 0) if snap_before else 0
@@ -209,8 +215,17 @@ def get_delta_workload(
         if hasattr(conn, "info") and conn.info.dbname
         else os.getenv("DB_NAME", "tpch_db")
     )
-    log_file = detect_log_path(conn)
-    workload = extract_workload(log_file, db_name, conn, start_offset=start_offset)
+    resolved_log = log_file or _ACTIVE_LOG_FILE
+    if not resolved_log:
+        raise ValueError("query_logger 'log_file' path is not configured.")
+    resolved_output = output_path if output_path is not None else _ACTIVE_WORKLOAD_OUTPUT
+    workload = extract_workload(
+        resolved_log,
+        db_name,
+        conn,
+        start_offset=start_offset,
+        output_path=resolved_output,
+    )
     return workload.queries, workload.schema, workload.query_weights
 
 
@@ -229,7 +244,10 @@ def observe_workload(
     4. Capture after-snapshots for writes and reads.
     5. Extract clean workload with actual parameters and compute write penalty deltas.
     """
+    global _ACTIVE_LOG_FILE, _ACTIVE_WORKLOAD_OUTPUT
     workload_cfg = cfg.get("workload", {})
+    workload_output = workload_cfg.get("workload_output", "workload.json")
+    _ACTIVE_WORKLOAD_OUTPUT = workload_output
     wp_config = cfg.get("write_penalty", {})
     wp_enabled = wp_config.get("enabled", False)
 
@@ -239,7 +257,20 @@ def observe_workload(
         if hasattr(conn, "info") and conn.info.dbname
         else os.getenv("DB_NAME", "tpch_db")
     )
-    log_file = detect_log_path(conn, workload_cfg.get("log_file"))
+    raw_log_file = workload_cfg.get("log_file")
+    if conn is not None:
+        try:
+            log_file = validate_log_path(raw_log_file, conn=conn)
+        except (FileNotFoundError, ValueError) as exc:
+            if conn:
+                conn.rollback()
+            clearHypotheticalIndexes(conn)
+            print(f"\n[Workload] FATAL ERROR: {exc}")
+            raise
+        _ACTIVE_LOG_FILE = log_file
+    else:
+        log_file = str(raw_log_file).strip() if raw_log_file else ""
+        _ACTIVE_LOG_FILE = log_file
 
     # --- Setup query_logger extension & truncate log ---
     if conn:
@@ -360,6 +391,9 @@ def observe_workload(
         raise SystemExit(1)
 
     if verbose:
+        if workload_output:
+            total_weight = sum(query_weights.values()) if query_weights else len(W)
+            print(f"[Workload] Saved {len(W)} unique queries (total execution weight: {total_weight:.1f}) to {workload_output}")
         param_count = sum(1 for q in W if getattr(q, "params", None))
         print(f"Loaded Workload: {len(W)} active queries loaded "
               f"({param_count} parameterized with real values).")

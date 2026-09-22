@@ -100,6 +100,24 @@ class CapturedQuery(str):
         inst.rows = rows
         return inst
 
+    def _param_signature(self) -> tuple:
+        return tuple(
+            (getattr(p, "position", idx), getattr(p, "pg_type", ""), getattr(p, "value", None))
+            for idx, p in enumerate(self.params, start=1)
+        )
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, CapturedQuery):
+            return str(self) == str(other) and self._param_signature() == other._param_signature()
+        if isinstance(other, str):
+            return not self.params and str(self) == other
+        return False
+
+    def __hash__(self) -> int:
+        if not self.params:
+            return super().__hash__()
+        return hash((super().__hash__(), self._param_signature()))
+
     def __repr__(self) -> str:
         return f"CapturedQuery({super().__repr__()}, params={self.params})"
 
@@ -124,36 +142,53 @@ class ExtractedWorkload:
 # Path Detection & Extension Setup
 # ---------------------------------------------------------------------------
 
-def detect_log_path(conn, configured_path: Optional[str] = None) -> str:
+def validate_log_path(log_path: Optional[str] = None, conn=None) -> str:
     """
-    Determine the query_logger log file path.
+    Validate that the configured query_logger log file exists.
 
-    If configured_path is provided and not empty / 'auto', returns it.
-    Otherwise queries PostgreSQL for SHOW query_logger.log_filename and
-    SHOW data_directory to resolve the absolute path.
+    No default path is assumed and no autodetection is performed.
+    The path must be explicitly provided via config.toml under [workload].
+
+    Raises ValueError if log_path is missing or empty.
+    Raises FileNotFoundError if the file cannot be verified at the given path.
     """
-    if configured_path and configured_path.strip() and configured_path.strip().lower() != "auto":
-        return str(Path(configured_path).expanduser().resolve())
+    if not log_path or not str(log_path).strip():
+        raise ValueError(
+            "query_logger 'log_file' path must be configured under [workload] in config.toml. "
+            "No default path is assumed."
+        )
 
-    if conn is None:
-        return "/var/lib/postgresql/16/main/query_logger.log"
+    path_obj = Path(str(log_path).strip()).expanduser()
+    resolved_path = str(path_obj.resolve())
 
+    # 1. Direct OS file check
     try:
-        with conn.cursor() as cur:
-            cur.execute("SHOW query_logger.log_filename;")
-            log_filename = cur.fetchone()[0]
+        if path_obj.is_file():
+            return resolved_path
+    except OSError:
+        pass
 
-            if Path(log_filename).is_absolute():
-                return log_filename
+    # 2. Database superuser check via pg_stat_file
+    if conn is not None:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT (pg_stat_file(%s)).size;", (resolved_path,))
+                row = cur.fetchone()
+                if row is not None and row[0] is not None:
+                    return resolved_path
+        except Exception:
+            if conn:
+                conn.rollback()
 
-            cur.execute("SHOW data_directory;")
-            data_dir = cur.fetchone()[0]
-            return str(Path(data_dir) / log_filename)
-    except Exception as exc:
-        if conn:
-            conn.rollback()
-        logger.warning("Could not auto-detect query_logger log path: %s. Using default.", exc)
-        return "/var/lib/postgresql/16/main/query_logger.log"
+    raise FileNotFoundError(
+        f"query_logger log file not found at: '{resolved_path}'. "
+        "Please verify that the query_logger extension is running and that "
+        "'log_file' in config.toml points to the correct location."
+    )
+
+
+# Backward compatibility alias
+detect_log_path = validate_log_path
 
 
 def setup_query_logger(conn, db_name: str) -> None:
@@ -410,14 +445,94 @@ def read_log_content(log_path: str, conn, start_offset: int = 0) -> str:
     return ""
 
 
+def save_workload_to_json(workload: ExtractedWorkload, output_path: str) -> None:
+    """Serialize ExtractedWorkload queries, parameters, and weights to a JSON file."""
+    data = []
+    for q in workload.queries:
+        query_text = str(q)
+        weight = float(workload.query_weights.get(q, workload.query_weights.get(query_text, 1.0)))
+        params_list = []
+        for p in getattr(q, "params", []):
+            params_list.append({
+                "position": getattr(p, "position", 0),
+                "type": getattr(p, "pg_type", "unknown"),
+                "value": getattr(p, "value", None),
+            })
+        data.append({
+            "query": query_text,
+            "weight": weight,
+            "with_params": len(params_list) > 0,
+            "duration_ms": getattr(q, "duration_ms", 0.0),
+            "rows_processed": getattr(q, "rows", 0),
+            "params": params_list,
+        })
+
+    out_file = Path(output_path).expanduser().resolve()
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    logger.info("Saved %d workload queries to %s", len(data), out_file)
+
+
+def load_workload_from_json(input_path: str, conn=None) -> ExtractedWorkload:
+    """Load ExtractedWorkload from a previously saved JSON file."""
+    p = Path(input_path).expanduser().resolve()
+    if not p.is_file():
+        raise FileNotFoundError(f"Workload JSON file not found at: {p}")
+
+    with open(p, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if not isinstance(data, list):
+        raise ValueError(f"Invalid workload JSON format at {p}: expected a list of query objects.")
+
+    queries: List[CapturedQuery] = []
+    query_weights: Dict[CapturedQuery, float] = {}
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        query_text = item.get("query", "")
+        if not query_text:
+            continue
+        weight = float(item.get("weight", 1.0))
+        duration_ms = float(item.get("duration_ms", 0.0))
+        rows = int(item.get("rows_processed", item.get("rows", 0)))
+        raw_params = item.get("params", [])
+        params = [
+            QueryParam(
+                position=param.get("position", idx),
+                pg_type=param.get("type", "text"),
+                value=param.get("value"),
+            )
+            for idx, param in enumerate(raw_params, start=1)
+            if isinstance(param, dict)
+        ]
+        q = CapturedQuery(
+            query=query_text,
+            params=params,
+            duration_ms=duration_ms,
+            rows=rows,
+        )
+        queries.append(q)
+        query_weights[q] = weight
+
+    schema = fetch_live_schema(conn) if conn is not None else {}
+    return ExtractedWorkload(queries=queries, query_weights=query_weights, schema=schema)
+
+
 def extract_workload(
     log_path: str,
     db_name: str,
     conn,
     start_offset: int = 0,
+    output_path: Optional[str] = None,
 ) -> ExtractedWorkload:
     """
-    Parse query_logger.log and extract the read workload for db_name.
+    Parse query_logger.log and extract the workload (SELECT, UPDATE, DELETE) for db_name.
+
+    Optionally serializes the extracted workload to output_path if provided.
 
     Returns
     -------
@@ -427,7 +542,10 @@ def extract_workload(
     content = read_log_content(log_path, conn, start_offset=start_offset)
     if not content.strip():
         logger.warning("query_logger log content is empty (path: %s, offset: %d)", log_path, start_offset)
-        return ExtractedWorkload(schema=fetch_live_schema(conn))
+        empty_workload = ExtractedWorkload(schema=fetch_live_schema(conn))
+        if output_path:
+            save_workload_to_json(empty_workload, output_path)
+        return empty_workload
 
     raw_entries: List[dict] = []
     for line_idx, line in enumerate(content.splitlines(), 1):
@@ -441,11 +559,12 @@ def extract_workload(
         except json.JSONDecodeError as e:
             logger.debug("Line %d: invalid JSON: %s", line_idx, e)
 
-    select_entries: List[dict] = []
+    valid_entries: List[dict] = []
     for entry in raw_entries:
         if entry.get("db") != db_name:
             continue
-        if entry.get("tag", "").upper() != "SELECT":
+        tag = entry.get("tag", "").upper()
+        if tag not in ("SELECT", "UPDATE", "DELETE", "INSERT"):
             continue
 
         query_text = entry.get("query", "")
@@ -454,44 +573,64 @@ def extract_workload(
             continue
 
         body = re.sub(r'^\s*((/\*.*?\*/)|(--.*)|\s)*', '', query_text, flags=re.DOTALL).strip()
-        if not body.upper().startswith("SELECT"):
-            continue
-        if body.upper().startswith("SELECT 1"):
-            continue
+        body_upper = body.upper()
+
+        if tag == "SELECT":
+            if not body_upper.startswith("SELECT"):
+                continue
+            if body_upper.startswith("SELECT 1"):
+                continue
+        elif tag == "UPDATE":
+            if not body_upper.startswith("UPDATE"):
+                continue
+        elif tag == "DELETE":
+            if not body_upper.startswith("DELETE"):
+                continue
+        elif tag == "INSERT":
+            # Only include INSERT statements that have an inner SELECT (e.g. INSERT INTO ... SELECT)
+            if "SELECT" not in body_upper:
+                continue
+
         if _is_internal_query(body):
             continue
 
         entry["_clean_query"] = query_text
-        select_entries.append(entry)
+        valid_entries.append(entry)
 
-    # Deduplicate by normalized query text, aggregating execution weights
-    seen: Dict[str, CapturedQuery] = {}
-    query_weights: Dict[str, float] = {}
+    # Deduplicate by normalized query text AND parameter values, aggregating execution weights
+    seen: Dict[CapturedQuery, CapturedQuery] = {}
+    query_weights: Dict[CapturedQuery, float] = {}
 
-    for entry in select_entries:
+    for entry in valid_entries:
         query_text = entry["_clean_query"]
-        if query_text in seen:
-            query_weights[query_text] += 1.0
+        params = _process_params(entry.get("params", []), db_name=db_name)
+        q = CapturedQuery(
+            query=query_text,
+            params=params,
+            duration_ms=float(entry.get("duration_ms", 0.0)),
+            rows=int(entry.get("rows", 0)),
+        )
+        if q in seen:
+            query_weights[q] += 1.0
         else:
-            params = _process_params(entry.get("params", []), db_name=db_name)
-            seen[query_text] = CapturedQuery(
-                query=query_text,
-                params=params,
-                duration_ms=float(entry.get("duration_ms", 0.0)),
-                rows=int(entry.get("rows", 0)),
-            )
-            query_weights[query_text] = 1.0
+            seen[q] = q
+            query_weights[q] = 1.0
 
     queries = list(seen.values())
     schema = fetch_live_schema(conn)
 
     logger.info(
-        "Extracted %d unique SELECT queries from %d log entries (%d total read)",
-        len(queries), len(select_entries), len(raw_entries),
+        "Extracted %d unique queries from %d log entries (%d total read)",
+        len(queries), len(valid_entries), len(raw_entries),
     )
 
-    return ExtractedWorkload(
+    workload = ExtractedWorkload(
         queries=queries,
         query_weights=query_weights,
         schema=schema,
     )
+
+    if output_path:
+        save_workload_to_json(workload, output_path)
+
+    return workload

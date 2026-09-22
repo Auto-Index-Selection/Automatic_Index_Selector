@@ -2,7 +2,7 @@
 # WORKLOAD RUNNER CONFIGURATION (workload_runner/config.toml)
 # ==============================================================================
 # Database to connect and run queries against
-database = "tpch_db"
+database = "tpcc_db"
 
 # Workload directory to run. Options:
 #   - Bundled workload inside workloads/: "workloads/tpch" or "workloads/pgbench"

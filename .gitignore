@@ -22,3 +22,4 @@ build/
 dist/
 .pytest_cache/
 test.py
+workload.json
