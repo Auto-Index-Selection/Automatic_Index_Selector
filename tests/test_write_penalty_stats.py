@@ -140,3 +140,46 @@ class TestAdvisorWriteStatsSnapshot:
             est.snapshot()
 
         assert conn.rolled_back, "Transaction must be rolled back on failure"
+
+
+class TestWritePenaltyEstimatorCostModel:
+    def test_cost_model_breakdown_and_hot_detection(self):
+        est = WritePenaltyEstimator(None, write_scale=1.0, cache_hit_ratio=0.9)
+        # Mock table with 10 inserts, 5 deletes, 20 updates on col_a
+        from auto_index_selector.CostEstimator.write_penalty_estimator import TableDMLDelta
+        delta = TableDMLDelta(
+            table_name="test_tbl",
+            delta_inserts=10,
+            delta_deletes=5,
+            column_set_update_rows={
+                frozenset({"col_a"}): 20,
+            },
+        )
+        delta_map = {"test_tbl": delta}
+
+        # 1. Non-HOT: index on col_a
+        breakdown_non_hot = est.estimate_index_penalty("test_tbl", ("col_a",), delta_map)
+        assert "insert_cost" in breakdown_non_hot
+        assert "delete_cost" in breakdown_non_hot
+        assert "update_cost" in breakdown_non_hot
+        assert "total_penalty" in breakdown_non_hot
+        assert "btree_height" in breakdown_non_hot
+        assert breakdown_non_hot["is_hot"] is False
+        assert breakdown_non_hot["update_cost"] > 0
+        assert breakdown_non_hot["total_penalty"] == (
+            breakdown_non_hot["insert_cost"] + breakdown_non_hot["delete_cost"] + breakdown_non_hot["update_cost"]
+        )
+
+        # 2. HOT: index on col_b (disjoint from updated set col_a)
+        breakdown_hot = est.estimate_index_penalty("test_tbl", ("col_b",), delta_map)
+        assert breakdown_hot["is_hot"] is True
+        assert breakdown_hot["update_cost"] == 0.0
+        assert breakdown_hot["total_penalty"] == breakdown_hot["insert_cost"] + breakdown_hot["delete_cost"]
+
+        # 3. get_penalty_function returns float and matches total_penalty
+        fn = est.get_penalty_function(delta_map)
+        assert callable(fn)
+        pen_float = fn("test_tbl", ("col_a",))
+        assert isinstance(pen_float, float)
+        assert pen_float == breakdown_non_hot["total_penalty"]
+

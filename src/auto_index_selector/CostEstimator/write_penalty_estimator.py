@@ -1,18 +1,11 @@
 """
 CostEstimator/write_penalty_estimator.py
 -----------------------------------------
-Strict B-tree write penalty estimator for the Automatic Index Selector pipeline.
-
+B-tree Write Penalty Estimator.
 Integrates:
   - B-tree maintenance cost theory (insert, delete, and non-HOT update overheads).
   - PostgreSQL catalog metadata for INSERTS and DELETES (pg_stat_user_tables).
   - Column-set UPDATE tracking strictly from the advisor_write_stats C extension.
-
-NO SILENT FALLBACK FOR UPDATES:
-  Updates are tracked strictly via advisor_write_stats. If the extension is not
-  preloaded in shared_preload_libraries or fails, an explicit RuntimeError is raised
-  immediately to halt the pipeline cleanly. Table-level update counters are NEVER used
-  as a fallback.
 """
 
 import math
@@ -22,21 +15,18 @@ from typing import Callable, Dict, List, Tuple, Optional, FrozenSet, Set
 
 logger = logging.getLogger(__name__)
 
-# B-tree physical constants
 _INDEX_TUPLE_OVERHEAD: int = 8        # bytes per index tuple (item pointer + header)
 _BTREE_FILL_FACTOR: float = 0.9      # default B-tree fill factor
 
 
-# ---------------------------------------------------------------------------
-# Data classes
-# ---------------------------------------------------------------------------
-
 @dataclass
 class PlannerCosts:
-    """PostgreSQL planner cost constants from pg_settings."""
+    """PostgreSQL planner cost constants from pg_settings and buffer cache stats."""
     random_page_cost: float = 4.0
     cpu_index_tuple_cost: float = 0.005
     seq_page_cost: float = 1.0
+    cpu_operator_cost: float = 0.0025
+    buffer_hit_ratio: float = 0.85
 
 
 @dataclass
@@ -54,18 +44,14 @@ class TableDMLDelta:
     table_name: str
     delta_inserts: int = 0
     delta_deletes: int = 0
-    # Per-column-set update rows: {frozenset({'colA', 'colB'}): rows_updated_delta}
-    # Tracked strictly via advisor_write_stats C extension (NO fallback to table updates).
     column_set_update_rows: Dict[FrozenSet[str], int] = field(default_factory=dict)
 
     @property
     def delta_updates(self) -> int:
-        """Total row updates across all column-sets tracked by advisor_write_stats."""
         return sum(self.column_set_update_rows.values())
 
     @property
     def total_dml(self) -> int:
-        """Total DML modifications (inserts + deletes + column-set updates)."""
         return self.delta_inserts + self.delta_deletes + self.delta_updates
 
 
@@ -76,30 +62,20 @@ TableDMLDeltaMap = Dict[str, TableDMLDelta]
 class Snapshot:
     """Point-in-time snapshot of advisor_write_stats and table insert/delete statistics."""
     column_set_stats: List[ColumnSetUpdateStats]
-    # Per-table INSERT and DELETE counters from pg_stat_user_tables:
-    #   {table_name: (n_tup_ins, n_tup_del)}
     table_stats: Dict[str, Tuple[int, int]]
 
-
-# ---------------------------------------------------------------------------
-# Main estimator class
-# ---------------------------------------------------------------------------
 
 class WritePenaltyEstimator:
     """B-tree write penalty estimator."""
 
-    def __init__(self, conn, write_scale: float = 1.0):
-        """Initialise the estimator."""
+    def __init__(self, conn, write_scale: float = 1.0, cache_hit_ratio: Optional[float] = None):
         self._conn = conn
         self._write_scale = write_scale
+        self._cache_hit_ratio = cache_hit_ratio
         self._planner_costs: Optional[PlannerCosts] = None
         self._block_size: Optional[int] = None
         self._height_cache: Dict[Tuple[str, Tuple[str, ...]], int] = {}
         self._table_cardinality_cache: Dict[str, int] = {}
-
-    # ------------------------------------------------------------------
-    # Extension management
-    # ------------------------------------------------------------------
 
     def ensure_extension(self) -> None:
         """Verify that advisor_write_stats extension is installed and preloaded."""
@@ -107,22 +83,14 @@ class WritePenaltyEstimator:
             try:
                 cur.execute("CREATE EXTENSION IF NOT EXISTS advisor_write_stats;")
                 self._conn.commit()
-                # Test whether the extension shared memory hook is active
                 cur.execute("SELECT * FROM advisor_get_column_set_stats() LIMIT 0;")
                 self._conn.commit()
-                logger.info("advisor_write_stats extension verified and operational.")
             except Exception as e:
                 if self._conn:
                     self._conn.rollback()
                 raise RuntimeError(
-                    "advisor_write_stats extension is unavailable or not loaded in shared_preload_libraries. "
-                    "Ensure 'advisor_write_stats' is in shared_preload_libraries in postgresql.conf and restart PostgreSQL. "
-                    f"Underlying error: {e}"
+                    f"advisor_write_stats extension is unavailable or not loaded in shared_preload_libraries: {e}"
                 ) from e
-
-    # ------------------------------------------------------------------
-    # Snapshot: capture current state
-    # ------------------------------------------------------------------
 
     def snapshot(self) -> Snapshot:
         """Take a point-in-time snapshot of write statistics."""
@@ -131,7 +99,6 @@ class WritePenaltyEstimator:
         return Snapshot(column_set_stats=column_set_stats, table_stats=table_stats)
 
     def _snapshot_extension_column_set_stats(self) -> List[ColumnSetUpdateStats]:
-        """Query advisor_get_column_set_stats() strictly; fails immediately on error."""
         results: List[ColumnSetUpdateStats] = []
         with self._conn.cursor() as cur:
             try:
@@ -140,7 +107,6 @@ class WritePenaltyEstimator:
                     rel_name = row[0].split('.')[-1] if row[0] else ""
                     raw_cols = row[1]
                     col_set = tuple(raw_cols) if raw_cols else ()
-
                     results.append(ColumnSetUpdateStats(
                         relation_name=rel_name,
                         column_set=col_set,
@@ -157,12 +123,16 @@ class WritePenaltyEstimator:
         return results
 
     def _snapshot_table_stats(self) -> Dict[str, Tuple[int, int]]:
-        """
-        Read cumulative (n_tup_ins, n_tup_del) from pg_stat_user_tables.
-        Clears the transaction's stats cache first so deltas are never zeroed.
-        """
         stats: Dict[str, Tuple[int, int]] = {}
         with self._conn.cursor() as cur:
+            try:
+                cur.execute("SELECT pg_stat_force_next_flush();")
+            except Exception:
+                pass
+            try:
+                cur.execute("SET stats_fetch_consistency = 'none';")
+            except Exception:
+                pass
             cur.execute("SELECT pg_stat_clear_snapshot();")
             cur.execute("""
                 SELECT relname,
@@ -174,17 +144,11 @@ class WritePenaltyEstimator:
                 stats[row[0]] = (int(row[1]), int(row[2]))
         return stats
 
-    # ------------------------------------------------------------------
-    # Delta computation
-    # ------------------------------------------------------------------
-
-    def compute_delta(
-        self, before: Snapshot, after: Snapshot
-    ) -> Dict[str, TableDMLDelta]:
+    def compute_delta(self, before: Snapshot, after: Snapshot) -> Dict[str, TableDMLDelta]:
         """Compute DML activity delta between two snapshots."""
         deltas: Dict[str, TableDMLDelta] = {}
 
-        # 1. Compute INSERT and DELETE deltas from pg_stat_user_tables
+        # 1. INSERT and DELETE deltas from pg_stat_user_tables
         for table_name, (ins_after, del_after) in after.table_stats.items():
             ins_before, del_before = before.table_stats.get(table_name, (0, 0))
             delta_ins = max(0, ins_after - ins_before)
@@ -196,7 +160,7 @@ class WritePenaltyEstimator:
                     delta_deletes=delta_del,
                 )
 
-        # 2. Compute per-column-SET UPDATE deltas strictly from advisor_write_stats
+        # 2. Per-column-SET UPDATE deltas strictly from advisor_write_stats
         before_set_lookup: Dict[Tuple[str, FrozenSet[str]], int] = {}
         for s in before.column_set_stats:
             before_set_lookup[(s.relation_name, frozenset(s.column_set))] = s.rows_updated
@@ -209,16 +173,86 @@ class WritePenaltyEstimator:
 
             if row_delta > 0:
                 if s.relation_name not in deltas:
-                    deltas[s.relation_name] = TableDMLDelta(
-                        table_name=s.relation_name
-                    )
+                    deltas[s.relation_name] = TableDMLDelta(table_name=s.relation_name)
                 deltas[s.relation_name].column_set_update_rows[set_key] = row_delta
 
         return deltas
 
-    # ------------------------------------------------------------------
-    # Penalty estimation (B-tree cost model)
-    # ------------------------------------------------------------------
+    def estimate_index_penalty(
+        self,
+        table: str,
+        columns: Tuple[str, ...],
+        delta_map: Optional[TableDMLDeltaMap] = None,
+    ) -> Dict[str, float]:
+        """
+        Compute write penalty components for a single (table, columns) index.
+        Returns a breakdown dict: {
+            'insert_cost': float,
+            'delete_cost': float,
+            'update_cost': float,
+            'total_penalty': float,
+            'btree_height': int,
+            'is_hot': bool
+        }
+        """
+        costs = self._get_planner_costs()
+        btree_height = self._estimate_btree_height(table, columns)
+
+        # ---------------------------------------------------------------------
+        # PostgreSQL B-Tree Architecture & Buffer Cache Cost Modeling:
+        # 1. Root & Internal levels (height - 1): Permanently cached in shared_buffers.
+        #    Traversing them consumes CPU cycles (cpu_operator_cost), not disk I/O.
+        # 2. Leaf level insertion/deletion: Weighted by buffer cache hit ratio.
+        #    When cached (p_hit), costs standard sequential/cached page cost (seq_page_cost).
+        #    When missed (1 - p_hit), physical random page I/O is incurred (random_page_cost).
+        # ---------------------------------------------------------------------
+        internal_levels = max(0, btree_height - 1)
+        traversal_cost = internal_levels * (costs.cpu_operator_cost * 10.0 + costs.cpu_index_tuple_cost)
+
+        p_hit = self._cache_hit_ratio if self._cache_hit_ratio is not None else costs.buffer_hit_ratio
+        p_hit = min(0.999, max(0.0, p_hit))
+        effective_leaf_cost = (1.0 - p_hit) * costs.random_page_cost + p_hit * costs.seq_page_cost
+
+        unit_insert_cost = traversal_cost + effective_leaf_cost + costs.cpu_index_tuple_cost
+        unit_delete_cost = traversal_cost + effective_leaf_cost
+        unit_update_cost_non_hot = unit_insert_cost + unit_delete_cost
+
+        scale = self._write_scale
+        delta = delta_map.get(table) if delta_map else None
+
+        if delta is None:
+            return {
+                "insert_cost": 0.0,
+                "delete_cost": 0.0,
+                "update_cost": 0.0,
+                "total_penalty": 0.0,
+                "btree_height": btree_height,
+                "is_hot": True,
+            }
+
+        ins_penalty = delta.delta_inserts * scale * unit_insert_cost
+        del_penalty = delta.delta_deletes * scale * unit_delete_cost
+
+        upd_penalty = 0.0
+        indexed_cols = set(columns)
+        has_non_hot_update = False
+
+        for col_set, rows in delta.column_set_update_rows.items():
+            if col_set & indexed_cols:
+                # Non-HOT: at least one indexed column was modified
+                upd_penalty += rows * scale * unit_update_cost_non_hot
+                has_non_hot_update = True
+            # else: HOT update -> 0 penalty
+
+        total_penalty = ins_penalty + del_penalty + upd_penalty
+        return {
+            "insert_cost": ins_penalty,
+            "delete_cost": del_penalty,
+            "update_cost": upd_penalty,
+            "total_penalty": total_penalty,
+            "btree_height": btree_height,
+            "is_hot": not has_non_hot_update and bool(delta.column_set_update_rows),
+        }
 
     def estimate_penalties(
         self,
@@ -226,39 +260,15 @@ class WritePenaltyEstimator:
         deltas: Dict[str, TableDMLDelta],
     ) -> Dict[Tuple[str, Tuple[str, ...]], float]:
         """Estimate write penalty for each candidate index."""
-        costs = self._get_planner_costs()
         penalties: Dict[Tuple[str, Tuple[str, ...]], float] = {}
 
         for table, col_lists in candidate_indexes.items():
-            delta = deltas.get(table)
-            if delta is None:
-                for cols in col_lists:
-                    penalties[(table, tuple(cols))] = 0.0
-                continue
-
             for cols in col_lists:
                 cols_tuple = tuple(cols)
-                penalty = self._compute_index_penalty(
-                    table, cols_tuple, delta, costs
-                )
-                penalties[(table, cols_tuple)] = penalty
+                breakdown = self.estimate_index_penalty(table, cols_tuple, deltas)
+                penalties[(table, cols_tuple)] = breakdown["total_penalty"]
 
         return penalties
-
-    def estimate_index_penalty(
-        self,
-        table: str,
-        columns: Tuple[str, ...],
-        delta_map: Optional[TableDMLDeltaMap] = None,
-    ) -> float:
-        """Compute write penalty for a single (table, columns) index on demand."""
-        if not delta_map:
-            return 0.0
-        delta = delta_map.get(table)
-        if not delta:
-            return 0.0
-        costs = self._get_planner_costs()
-        return self._compute_index_penalty(table, tuple(columns), delta, costs)
 
     def get_penalty_function(
         self,
@@ -271,66 +281,26 @@ class WritePenaltyEstimator:
             cols_tuple = tuple(columns) if isinstance(columns, (list, tuple)) else (columns,)
             key = (table, cols_tuple)
             if key not in memo:
-                memo[key] = self.estimate_index_penalty(table, cols_tuple, delta_map)
+                res = self.estimate_index_penalty(table, cols_tuple, delta_map)
+                memo[key] = res["total_penalty"] if isinstance(res, dict) else float(res)
             return memo[key]
 
         return _penalty_fn
 
-    def _compute_index_penalty(
-        self,
-        table: str,
-        columns: Tuple[str, ...],
-        delta: TableDMLDelta,
-        costs: PlannerCosts,
-    ) -> float:
-        """Compute write penalty for a single (table, columns) index."""
-        btree_height = self._estimate_btree_height(table, columns)
-
-        insert_cost = (
-            btree_height * costs.random_page_cost
-            + costs.cpu_index_tuple_cost
-        )
-        delete_cost = btree_height * costs.random_page_cost
-        update_cost_non_hot = insert_cost + delete_cost
-
-        scale = self._write_scale
-        penalty = 0.0
-
-        # INSERT penalty
-        penalty += delta.delta_inserts * scale * insert_cost
-
-        # DELETE penalty
-        penalty += delta.delta_deletes * scale * delete_cost
-
-        # UPDATE penalty strictly from column_set_update_rows (NO fallback to table updates)
-        indexed_cols = set(columns)
-        for col_set, rows in delta.column_set_update_rows.items():
-            if col_set & indexed_cols:
-                # Non-HOT: at least one indexed column was modified
-                penalty += rows * scale * update_cost_non_hot
-            # else: HOT update (disjoint set) → 0 penalty
-
-        return penalty
-
-    # ------------------------------------------------------------------
-    # B-tree geometry helpers
-    # ------------------------------------------------------------------
-
     def _get_planner_costs(self) -> PlannerCosts:
-        """Fetch PostgreSQL planner cost constants from pg_settings."""
         if self._planner_costs is not None:
             return self._planner_costs
 
         costs = PlannerCosts()
+        if self._conn is None:
+            self._planner_costs = costs
+            return costs
+
         with self._conn.cursor() as cur:
             cur.execute("""
                 SELECT name, setting
                 FROM pg_settings
-                WHERE name IN (
-                    'random_page_cost',
-                    'cpu_index_tuple_cost',
-                    'seq_page_cost'
-                )
+                WHERE name IN ('random_page_cost', 'cpu_index_tuple_cost', 'seq_page_cost', 'cpu_operator_cost');
             """)
             for name, val in cur.fetchall():
                 try:
@@ -341,28 +311,42 @@ class WritePenaltyEstimator:
                         costs.cpu_index_tuple_cost = v
                     elif name == "seq_page_cost":
                         costs.seq_page_cost = v
+                    elif name == "cpu_operator_cost":
+                        costs.cpu_operator_cost = v
                 except (ValueError, TypeError):
                     pass
+
+            # Detect buffer cache hit ratio from pg_statio_user_indexes if available
+            try:
+                cur.execute("""
+                    SELECT 
+                        coalesce(sum(idx_blks_hit)::float / nullif(sum(idx_blks_hit + idx_blks_read), 0), 0.85)
+                    FROM pg_statio_user_indexes;
+                """)
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    costs.buffer_hit_ratio = float(row[0])
+            except Exception:
+                costs.buffer_hit_ratio = 0.85
 
         self._planner_costs = costs
         return costs
 
     def _get_block_size(self) -> int:
-        """Fetch block_size in bytes from pg_settings."""
         if self._block_size is not None:
             return self._block_size
+        if self._conn is None:
+            self._block_size = 8192
+            return 8192
 
         with self._conn.cursor() as cur:
-            cur.execute("SHOW block_size")
+            cur.execute("SHOW block_size;")
             val = cur.fetchone()[0]
             self._block_size = int(val)
 
         return self._block_size
 
-    def _estimate_btree_height(
-        self, table: str, columns: Tuple[str, ...]
-    ) -> int:
-        """Estimate B-tree height analytically from table cardinality and key width."""
+    def _estimate_btree_height(self, table: str, columns: Tuple[str, ...]) -> int:
         cache_key = (table, columns)
         if cache_key in self._height_cache:
             return self._height_cache[cache_key]
@@ -383,18 +367,17 @@ class WritePenaltyEstimator:
         return height
 
     def _get_table_cardinality(self, table: str) -> int:
-        """Get live row count estimate from pg_class.reltuples."""
         if table in self._table_cardinality_cache:
             return self._table_cardinality_cache[table]
+        if self._conn is None:
+            return 0
 
         with self._conn.cursor() as cur:
             cur.execute("""
                 SELECT reltuples
                 FROM pg_class
                 WHERE relname = %s
-                  AND relnamespace = (
-                      SELECT oid FROM pg_namespace WHERE nspname = 'public'
-                  )
+                  AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public');
             """, (table,))
             row = cur.fetchone()
             cardinality = int(row[0]) if (row and row[0] is not None and row[0] >= 0) else 0
@@ -402,17 +385,17 @@ class WritePenaltyEstimator:
         self._table_cardinality_cache[table] = cardinality
         return cardinality
 
-    def _estimate_index_entry_bytes(
-        self, table: str, columns: Tuple[str, ...]
-    ) -> int:
-        """Estimate the byte width of a B-tree index entry."""
+    def _estimate_index_entry_bytes(self, table: str, columns: Tuple[str, ...]) -> int:
+        if self._conn is None:
+            return _INDEX_TUPLE_OVERHEAD + max(len(columns) * 8, 8)
+
         total_width = 0
         with self._conn.cursor() as cur:
             for col in columns:
                 cur.execute("""
                     SELECT avg_width
                     FROM pg_stats
-                    WHERE tablename = %s AND attname = %s
+                    WHERE tablename = %s AND attname = %s;
                 """, (table, col))
                 row = cur.fetchone()
                 col_width = int(row[0]) if (row and row[0] is not None) else 8
