@@ -33,7 +33,6 @@ from auto_index_selector.Workload.queryLoggerWorkload import (
     truncate_log,
     validate_log_path,
 )
-from auto_index_selector.CostEstimator.costEstimator import clearHypotheticalIndexes
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config.toml"
 
@@ -259,40 +258,33 @@ def observe_workload(
         raise SystemExit(1)
     db_name = conn.info.dbname
     raw_log_file = workload_cfg.get("log_file")
-    if conn is not None:
-        try:
-            log_file = validate_log_path(raw_log_file, conn=conn)
-        except (FileNotFoundError, ValueError) as exc:
-            if conn:
-                conn.rollback()
-            clearHypotheticalIndexes(conn)
-            print(f"\n[Workload] FATAL ERROR: {exc}")
-            raise
-        _ACTIVE_LOG_FILE = log_file
-    else:
-        log_file = str(raw_log_file).strip() if raw_log_file else ""
-        _ACTIVE_LOG_FILE = log_file
+    try:
+        log_file = validate_log_path(raw_log_file, conn=conn)
+    except (FileNotFoundError, ValueError) as exc:
+        conn.rollback()
+        print(f"\n[Workload] FATAL ERROR: {exc}")
+        raise
+    _ACTIVE_LOG_FILE = log_file
 
     # --- Setup query_logger extension & truncate log ---
-    if conn:
-        try:
-            setup_query_logger(conn, db_name)
-            truncated = truncate_log(log_file, conn=conn)
-            reset_stats(conn)
-            if verbose:
-                if truncated:
-                    print(f"[Workload:query_logger] Enabled for {db_name}, log truncated to 0 bytes: {log_file}")
-                else:
-                    print(f"[Workload:query_logger] Enabled for {db_name}, log not truncated (using offset tracking): {log_file}")
-        except Exception as e:
-            if verbose:
-                print(f"[Workload:query_logger] Warning during setup: {e}")
+    try:
+        setup_query_logger(conn, db_name)
+        truncated = truncate_log(log_file, conn=conn)
+        reset_stats(conn)
+        if verbose:
+            if truncated:
+                print(f"[Workload:query_logger] Enabled for {db_name}, log truncated to 0 bytes: {log_file}")
+            else:
+                print(f"[Workload:query_logger] Enabled for {db_name}, log not truncated (using offset tracking): {log_file}")
+    except Exception as e:
+        if verbose:
+            print(f"[Workload:query_logger] Warning during setup: {e}")
 
     # --- 1. Write penalty before-snapshot ---
     wp_estimator = None
     snap_before_writes = None
 
-    if wp_enabled and conn:
+    if wp_enabled:
         from auto_index_selector.CostEstimator.write_penalty_estimator import WritePenaltyEstimator
         write_scale = float(wp_config.get("write_scale", 1.0))
         wp_estimator = WritePenaltyEstimator(conn, write_scale=write_scale)
@@ -300,9 +292,7 @@ def observe_workload(
             wp_estimator.ensure_extension()
             snap_before_writes = wp_estimator.snapshot()
         except Exception as e:
-            if conn:
-                conn.rollback()
-            clearHypotheticalIndexes(conn)
+            conn.rollback()
             print(f"\n[WritePenalty] FATAL ERROR: advisor_write_stats extension is unavailable: {e}")
             print("[WritePenalty] Cleaned up state. Halting pipeline.")
             raise SystemExit(1)
@@ -313,9 +303,7 @@ def observe_workload(
     try:
         snap_before_reads = take_snapshot(conn)
     except Exception as e:
-        if conn:
-            conn.rollback()
-        clearHypotheticalIndexes(conn)
+        conn.rollback()
         print(f"[Workload] FATAL ERROR: Failed to capture read before-snapshot: {e}")
         print("[Workload] Cleaned up state. Halting pipeline.")
         raise SystemExit(1)
@@ -349,16 +337,14 @@ def observe_workload(
         )
 
     # Allow query_logger background worker to flush the final batch
-    if conn is not None and observation_hook is None:
+    if observation_hook is None:
         flush_and_wait(0.3)
 
     # --- 4. Read & write after-snapshots ---
     try:
         snap_after_reads = take_snapshot(conn)
     except Exception as e:
-        if conn:
-            conn.rollback()
-        clearHypotheticalIndexes(conn)
+        conn.rollback()
         print(f"[Workload] FATAL ERROR: Failed to capture read after-snapshot: {e}")
         print("[Workload] Cleaned up state. Halting pipeline.")
         raise SystemExit(1)
@@ -368,9 +354,7 @@ def observe_workload(
         try:
             snap_after_writes = wp_estimator.snapshot()
         except Exception as e:
-            if conn:
-                conn.rollback()
-            clearHypotheticalIndexes(conn)
+            conn.rollback()
             print(f"\n[WritePenalty] FATAL ERROR: Failed to capture write stats after-snapshot: {e}")
             print("[WritePenalty] Cleaned up state. Halting pipeline.")
             raise SystemExit(1)
@@ -379,9 +363,7 @@ def observe_workload(
     W, schema, query_weights = get_delta_workload(conn, snap_before_reads, snap_after_reads)
 
     if not W:
-        if conn:
-            conn.rollback()
-        clearHypotheticalIndexes(conn)
+        conn.rollback()
         source = (
             "the observation hook"
             if observation_hook
