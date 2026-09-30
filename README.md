@@ -138,7 +138,7 @@ Defines PostgreSQL connection credentials:
 | `port` | `int` | `5432` | PostgreSQL port number. |
 | `user` | `string` | `"postgres"` | Database user. |
 | `password` | `string` | `""` | Database password. |
-| `dbname` | `string` | `"tpch_db"` | Target database name. |
+| `dbname` | `string` | *(from .env / required)* | Target database name. |
 
 > **Note**: Any field left empty (`""`) will automatically fall back to environment variables (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`) or `.env`.
 

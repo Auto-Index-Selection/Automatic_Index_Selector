@@ -176,7 +176,10 @@ def _connect_from_env(cfg: Optional[dict] = None):
 
     db_cfg = cfg.get("database", {}) if cfg else {}
 
-    dbname = db_cfg.get("dbname") or os.getenv("DB_NAME", "postgres")
+    dbname = db_cfg.get("dbname") or os.getenv("DB_NAME")
+    if not dbname:
+        print("\n[Database] FATAL ERROR: Database name is not configured under [database] in config.toml or DB_NAME in .env.")
+        raise SystemExit(1)
     user = db_cfg.get("user") or os.getenv("DB_USER", "postgres")
     password = db_cfg.get("password") or os.getenv("DB_PASSWORD", "")
     host = db_cfg.get("host") or os.getenv("DB_HOST", "localhost")
@@ -210,11 +213,10 @@ def get_delta_workload(
 ) -> Tuple[List[Any], Dict[str, Dict[str, str]], Dict[str, float]]:
     """Extract workload queries and weights captured between snapshots."""
     start_offset = getattr(snap_before, "file_offset", 0) if snap_before else 0
-    db_name = (
-        conn.info.dbname
-        if hasattr(conn, "info") and conn.info.dbname
-        else os.getenv("DB_NAME", "tpch_db")
-    )
+    if not conn or not hasattr(conn, "info") or not conn.info.dbname:
+        print("\n[Database] FATAL ERROR: An active database connection is required to extract workload.")
+        raise SystemExit(1)
+    db_name = conn.info.dbname
     resolved_log = log_file or _ACTIVE_LOG_FILE
     if not resolved_log:
         raise ValueError("query_logger 'log_file' path is not configured.")
@@ -251,12 +253,11 @@ def observe_workload(
     wp_config = cfg.get("write_penalty", {})
     wp_enabled = wp_config.get("enabled", False)
 
-    # Resolve database name and log file destination
-    db_name = (
-        conn.info.dbname
-        if hasattr(conn, "info") and conn.info.dbname
-        else os.getenv("DB_NAME", "tpch_db")
-    )
+    # Resolve database name from active connection
+    if not conn or not hasattr(conn, "info") or not conn.info.dbname:
+        print("\n[Database] FATAL ERROR: An active database connection is required to observe workload.")
+        raise SystemExit(1)
+    db_name = conn.info.dbname
     raw_log_file = workload_cfg.get("log_file")
     if conn is not None:
         try:

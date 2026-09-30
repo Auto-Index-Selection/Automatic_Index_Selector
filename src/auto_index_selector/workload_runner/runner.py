@@ -42,7 +42,11 @@ class WorkloadRunner:
             base_cfg.update(config_dict)
         self.config = base_cfg
 
-        self.database: str = self.config.get("database", "tpch_db")
+        self.database: str = (
+            self.config.get("database")
+            or self.config.get("dbname")
+            or os.getenv("DB_NAME", "")
+        )
         self.iterations: int = int(self.config.get("iterations", 1))
         self.execute_dml: bool = bool(self.config.get("execute_dml", False))
         self.statement_timeout_ms: int = int(self.config.get("statement_timeout_ms", 30000))
@@ -98,6 +102,9 @@ class WorkloadRunner:
     def _connect(self):
         """Create a dedicated connection using config or .env credentials."""
         load_dotenv()
+        if not self.database:
+            print("\n[WorkloadRunner] FATAL ERROR: Database name is not configured.")
+            raise SystemExit(1)
         return psycopg2.connect(
             dbname=self.database,
             user=self.config.get("user") or os.getenv("DB_USER", "postgres"),
@@ -112,6 +119,11 @@ class WorkloadRunner:
         if conn is None:
             conn = self._connect()
             close_on_exit = True
+
+        if not conn or not hasattr(conn, "info") or not conn.info.dbname:
+            print("\n[WorkloadRunner] FATAL ERROR: An active database connection is required.")
+            raise SystemExit(1)
+        self.database = conn.info.dbname
 
         print(f"[WorkloadRunner] Target database: '{self.database}'")
         print(f"[WorkloadRunner] Loaded {len(self.read_files)} read queries from {self.queries_dir}")
