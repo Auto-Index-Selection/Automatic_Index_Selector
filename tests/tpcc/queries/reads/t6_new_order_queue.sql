@@ -1,6 +1,0 @@
--- Delivery: oldest undelivered order in a district.
-SELECT no_o_id
-FROM new_orders
-WHERE no_w_id = 5 AND no_d_id = 3
-ORDER BY no_o_id ASC
-LIMIT 1;

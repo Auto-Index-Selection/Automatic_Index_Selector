@@ -1,25 +1,27 @@
-venv
-.env
-workspace
+# Virtual environments
+.venv/
+venv/
+env/
+workspace/
 
-# Ignore all __pycache__ directories recursively
+# Bytecode and caches
 __pycache__/
-
-# Ignore compiled bytecode files
 *.py[cod]
 *$py.class
-
-tests/tpcc/results/
-tests/pgbench/results/
-legacy_tests/
-tools/
-*.txt
-bug
+.pytest_cache/
 
 # Build & packaging artifacts
 *.egg-info/
 build/
 dist/
-.pytest_cache/
-test.py
+
+# Runtime output
 workload.json
+*.log
+
+# Excluded suites from standalone branch
+tests/
+legacy_tests/
+tools/
+scripts/
+workload/
