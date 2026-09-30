@@ -115,11 +115,3 @@ enabled = true
 #   - 10.0+ : Projects a higher write volume (e.g. 10x or 100x OLTP load) to
 #             penalize write-heavy indexes more aggressively.
 write_scale = 1.0
-
-# window_duration_seconds:
-#   Observation time in seconds to monitor PostgreSQL database traffic.
-#   - 0     : No sleep; captures database traffic between before-and-after snapshots.
-#   - 10-30 : Pauses the pipeline for N seconds so external traffic (from your
-#             application, `pgbench`, or `python scripts/simulate_workload.py`)
-#             can run against the live database before `snap_after` is taken.
-window_duration_seconds = 60

@@ -315,9 +315,7 @@ def observe_workload(
 
     # --- 3. Observation execution ---
     mode = workload_cfg.get("mode", "timer")
-    timer_duration = int(
-        workload_cfg.get("timer_seconds", wp_config.get("window_duration_seconds", 60))
-    )
+    timer_duration = int(workload_cfg.get("timer_seconds", 60))
 
     if observation_hook is not None:
         if verbose:

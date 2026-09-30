@@ -223,14 +223,12 @@ Configures the buffer-cache-aware B-tree write maintenance penalty model:
 [write_penalty]
 enabled = true
 write_scale = 1.0
-window_duration_seconds = 60
 ```
 
 | Option | Type | Default | Description |
 |:---|:---:|:---:|:---|
 | `enabled` | `boolean` | `true` | When true, tracks DML activity via `advisor_write_stats` and deducts write penalty from candidate benefit. Set to `false` for read-only optimization. |
 | `write_scale` | `float` | `1.0` | Multiplier applied to observed write counts (`1.0` = exact observed writes; `10.0+` = projected write-heavy OLTP spikes). |
-| `window_duration_seconds` | `int` | `60` | Observation window duration between write before-and-after snapshots. |
 
 #### Analytical Cost Model
 The write penalty estimator models PostgreSQL B-tree overhead as:
