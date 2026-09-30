@@ -207,6 +207,7 @@ workload_output = "workload.json"
 | `execute_dml` | `boolean` | `true` | If true, companion DML updates/inserts are executed to induce write penalty stats. |
 | `log_file` | `string` | *(Mandatory)* | Path to the `query_logger.log` file. If missing or path is invalid, execution aborts immediately. |
 | `workload_output` | `string` | `"workload.json"` | Path to write the extracted workload in structured JSON format. |
+| `truncate_log` | `boolean` | `false` | If true, truncates `query_logger.log` and resets telemetry before observation. When false (default), preserves log history and uses byte-offset tracking. |
 
 #### Workload Deduplication & Parameter Sensitivity
 Queries observed in `query_logger.log` are parsed and deduplicated **sensitively with their parameter values**:

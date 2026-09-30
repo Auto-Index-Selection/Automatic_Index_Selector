@@ -93,6 +93,11 @@ log_file = "/var/lib/postgresql/16/main/query_logger.log"
 # Path where the extracted workload (queries, parameters, weights) is saved in JSON format
 workload_output = "workload.json"
 
+# Whether to truncate the query_logger.log file before observing the workload.
+# Defaults to false: preserves existing log history and safely uses byte-offset tracking.
+# Set to true if you explicitly want to reset the log file to 0 bytes.
+truncate_log = false
+
 
 # ------------------------------------------------------------------------------
 # 4. WRITE PENALTY ESTIMATOR STAGE

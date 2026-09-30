@@ -266,16 +266,21 @@ def observe_workload(
         raise
     _ACTIVE_LOG_FILE = log_file
 
-    # --- Setup query_logger extension & truncate log ---
+    # --- Setup query_logger extension & optional log truncation ---
     try:
         setup_query_logger(conn, db_name)
-        truncated = truncate_log(log_file, conn=conn)
-        reset_stats(conn)
-        if verbose:
-            if truncated:
-                print(f"[Workload:query_logger] Enabled for {db_name}, log truncated to 0 bytes: {log_file}")
-            else:
-                print(f"[Workload:query_logger] Enabled for {db_name}, log not truncated (using offset tracking): {log_file}")
+        should_truncate = bool(workload_cfg.get("truncate_log", False))
+        if should_truncate:
+            truncated = truncate_log(log_file, conn=conn)
+            reset_stats(conn)
+            if verbose:
+                if truncated:
+                    print(f"[Workload:query_logger] Enabled for {db_name}, log truncated to 0 bytes: {log_file}")
+                else:
+                    print(f"[Workload:query_logger] Enabled for {db_name}, truncate requested but could not truncate (offset tracking active): {log_file}")
+        else:
+            if verbose:
+                print(f"[Workload:query_logger] Enabled for {db_name}, using offset tracking (log preserved): {log_file}")
     except Exception as e:
         if verbose:
             print(f"[Workload:query_logger] Warning during setup: {e}")
