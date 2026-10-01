@@ -42,14 +42,17 @@ class WorkloadRunner:
 
         self.database: str = (
             self.config.get("database")
-            or self.config.get("dbname")
             or os.getenv("DB_NAME", "")
         )
         self.iterations: int = int(self.config.get("iterations", 1))
         self.execute_dml: bool = bool(self.config.get("execute_dml", False))
         self.statement_timeout_ms: int = int(self.config.get("statement_timeout_ms", 30000))
 
-        self.queries_dir = self._resolve_queries_dir(self.config.get("queries_path", "workloads/tpch"))
+        raw_queries_path = self.config.get("queries_path")
+        if not raw_queries_path:
+            print("\n[WorkloadRunner] FATAL ERROR: 'queries_path' is not configured.")
+            raise SystemExit(1)
+        self.queries_dir = self._resolve_queries_dir(raw_queries_path)
         self.read_files, self.dml_files = self._discover_queries(self.queries_dir)
 
     def _resolve_queries_dir(self, raw_path: str) -> Path:

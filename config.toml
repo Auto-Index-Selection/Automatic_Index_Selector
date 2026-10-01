@@ -14,7 +14,7 @@ host = "localhost"
 port = 5432
 user = "postgres"
 password = "123"
-dbname = "tpcc_db"
+dbname = "tpch_db"
 
 
 # ------------------------------------------------------------------------------
@@ -75,7 +75,7 @@ mode = "custom"
 # Workload to execute when mode = "custom":
 #   - Bundled benchmarks: "tpch" or "pgbench"
 #   - Or a path to a directory containing .sql queries
-queries_path = "/home/pratik/mtp-integration/Automatic_Index_Selector/src/auto_index_selector/workload_runner/workloads/pgbench"
+queries_path = "/home/pratik/mtp-integration/Automatic_Index_Selector/src/auto_index_selector/workload_runner/workloads/tpch"
 
 # Number of execution iterations (rounds) for mode = "custom"
 iterations = 5
