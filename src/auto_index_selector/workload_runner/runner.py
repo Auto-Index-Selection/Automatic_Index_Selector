@@ -13,8 +13,6 @@ import psycopg2
 from dotenv import load_dotenv
 import tomllib
 
-from .param_generator import ParameterGenerator
-
 _MODULE_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _MODULE_DIR.parent.parent.parent
 DEFAULT_CONFIG_PATH = _MODULE_DIR / "config.toml"
@@ -50,7 +48,6 @@ class WorkloadRunner:
         self.iterations: int = int(self.config.get("iterations", 1))
         self.execute_dml: bool = bool(self.config.get("execute_dml", False))
         self.statement_timeout_ms: int = int(self.config.get("statement_timeout_ms", 30000))
-        self.param_gen = ParameterGenerator()
 
         self.queries_dir = self._resolve_queries_dir(self.config.get("queries_path", "workloads/tpch"))
         self.read_files, self.dml_files = self._discover_queries(self.queries_dir)
@@ -166,13 +163,9 @@ class WorkloadRunner:
                         sql = dml_file.read_text(encoding="utf-8").strip()
                         if not sql:
                             continue
-                        params = self.param_gen.generate(dml_file.stem)
                         try:
                             with conn.cursor() as cur:
-                                if params is not None:
-                                    cur.execute(sql, params)
-                                else:
-                                    cur.execute(sql)
+                                cur.execute(sql)
                             conn.commit()
                             round_dml += 1
                             executed_dml += 1

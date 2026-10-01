@@ -1,3 +1,3 @@
 UPDATE supplier
-SET s_comment = %s
-WHERE s_suppkey = %s;
+SET s_comment = 'NCNwEt hAOTiiKFuFynDXKgUNOspia'
+WHERE s_suppkey = 4316;

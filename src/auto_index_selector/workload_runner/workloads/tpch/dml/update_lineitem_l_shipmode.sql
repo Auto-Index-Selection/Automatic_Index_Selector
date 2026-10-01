@@ -1,1 +1,1 @@
-UPDATE lineitem SET l_shipmode = %s WHERE l_orderkey = %s AND l_linenumber = %s;
+UPDATE lineitem SET l_shipmode = 'TRUCK' WHERE l_orderkey = 488198 AND l_linenumber = 7;

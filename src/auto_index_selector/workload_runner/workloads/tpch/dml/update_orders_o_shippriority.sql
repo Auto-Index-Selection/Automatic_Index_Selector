@@ -1,1 +1,1 @@
-UPDATE orders SET o_shippriority = %s WHERE o_orderkey = %s;
+UPDATE orders SET o_shippriority = 0 WHERE o_orderkey = 138808;

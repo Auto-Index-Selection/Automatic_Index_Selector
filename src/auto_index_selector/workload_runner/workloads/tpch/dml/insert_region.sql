@@ -1,2 +1,2 @@
 INSERT INTO region
-VALUES (%s, %s, %s);
+VALUES (79007, 'Region_79007', 'Generated Region');

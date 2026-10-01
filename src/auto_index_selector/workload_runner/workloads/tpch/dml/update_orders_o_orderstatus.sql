@@ -1,1 +1,1 @@
-UPDATE orders SET o_orderstatus = %s WHERE o_orderkey = %s;
+UPDATE orders SET o_orderstatus = 'F' WHERE o_orderkey = 561494;

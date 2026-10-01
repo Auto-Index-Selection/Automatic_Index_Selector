@@ -1,1 +1,1 @@
-UPDATE supplier SET s_nationkey = %s WHERE s_suppkey = %s;
+UPDATE supplier SET s_nationkey = 16 WHERE s_suppkey = 2928;

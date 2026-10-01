@@ -1,1 +1,1 @@
-UPDATE lineitem SET l_orderkey = l_orderkey WHERE l_orderkey = %s;
+UPDATE lineitem SET l_orderkey = l_orderkey WHERE l_orderkey = 793845;

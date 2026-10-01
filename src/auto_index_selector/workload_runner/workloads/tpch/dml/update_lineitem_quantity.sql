@@ -1,3 +1,3 @@
 UPDATE lineitem
-SET l_quantity = l_quantity + %s
-WHERE l_orderkey = %s AND l_linenumber = %s;
+SET l_quantity = l_quantity + -4.29
+WHERE l_orderkey = 1331646 AND l_linenumber = 2;
