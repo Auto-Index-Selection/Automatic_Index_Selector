@@ -1,0 +1,7 @@
+drop index if exists item_i_price_idx;
+drop index if exists order_line_ol_amount_idx;
+drop index if exists orders_o_w_id_idx;
+drop index if exists stock_s_i_id_s_quantity_idx;
+drop index if exists stock_s_i_id_s_w_id_s_quantity_idx;
+drop index if exists stock_s_quantity_idx;
+drop index if exists stock_s_w_id_s_quantity_idx;

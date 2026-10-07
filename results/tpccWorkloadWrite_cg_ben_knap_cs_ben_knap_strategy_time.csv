@@ -1,0 +1,2 @@
+workload,candidate_generation,config_selection,cg_time_seconds,cs_time_seconds,total_time_seconds
+tpccWorkloadWrite,cg_ben_knap,cs_ben_knap,0.394665,3.231420,3.626086

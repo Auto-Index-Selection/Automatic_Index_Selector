@@ -22,13 +22,15 @@ from dotenv import load_dotenv
 
 import tomllib
 
-from auto_index_selector.Workload.pgStatStatementsWorkload import take_snapshot, get_delta_workload
+
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config.toml"
 
 SECTION_TO_PACKAGE = {
     "candidate_generation": "auto_index_selector.CandidateGeneration",
     "config_selection":     "auto_index_selector.ConfigSelection",
+    "workload":             "auto_index_selector.Workload",
+    "write_penalty":        "auto_index_selector.WritePenalty"
 }
 
 
@@ -77,7 +79,7 @@ def load_pipeline(config_path: Optional[Path] = None):
     Returns a dict: {"candidate_generation": module, "config_selection": module}
     """
     config = load_config(config_path)
-
+    print(config)
     pipeline = {}
     for section in SECTION_TO_PACKAGE:
         pipeline[section] = import_selected_module(section, config)
@@ -151,14 +153,14 @@ def run_auto_index_selector(
                 cfg[k].update(v)
             else:
                 cfg[k] = v
-
     cg_module = import_selected_module("candidate_generation", cfg)
     cs_module = import_selected_module("config_selection", cfg)
+    wl_module = import_selected_module("workload", cfg)
 
     if verbose:
         print(f"[CandidateGeneration] using module: {cg_module.__name__}")
         print(f"[ConfigSelection]     using module: {cs_module.__name__}")
-        # print(f"[Workload]            using pg_stat_statements (live delta workload)")
+        print(f"[Workload]            using {wl_module.__name__}")
 
     # connection setup
     close_conn_on_exit = False
@@ -171,6 +173,7 @@ def run_auto_index_selector(
             host=os.getenv("DB_HOST"),
             port=os.getenv("DB_PORT")
         )
+        conn.autocommit = True
         close_conn_on_exit = True
         if verbose:
             print("Connection established successfully!")
@@ -189,6 +192,7 @@ def run_auto_index_selector(
             try:
                 wp_estimator.ensure_extension()
                 snap_before_writes = wp_estimator.snapshot()
+
             except Exception as e:
                 print(f"[WritePenalty]  Error: Failed to capture write stats before-snapshot: {e}")
                 return set(), [], {}, None
@@ -196,29 +200,54 @@ def run_auto_index_selector(
             if verbose:
                 print(f"[WritePenalty] Captured write before-snapshot (scale={write_scale})")
 
-        try:
-            snap_before_reads = take_snapshot(conn)
-        except Exception as e:
-            print(f"[Workload]  Error: Failed to capture pg_stat_statements before-snapshot: {e}")
-            return set(), [], {}, None
+        snap_before_reads = None
+        if hasattr(wl_module, "take_snapshot"):
+            try:
+                snap_before_reads = wl_module.take_snapshot(conn)
+            except Exception as e:
+                print(f"[Workload]  Error: Failed to capture before-snapshot: {e}")
+                return set(), [], {}, None
 
-        if verbose:
-            print(f"[Workload] Captured pg_stat_statements before-snapshot ({len(snap_before_reads.entries)} queries tracked)")
+            if verbose:
+                print(f"[Workload] Captured before-snapshot ({len(snap_before_reads.entries)} queries tracked)")
 
         # --- 2. Observation Window (Wait for background application/simulator traffic) ---
         duration = int(wp_config.get("window_duration_seconds", 0))
         if duration > 0:
-            import time
+            import subprocess
             if verbose:
-                print(f"[Observer] Monitoring database for {duration}s observation window...")
-            time.sleep(duration)
+                print(f"[Observer] Injecting DML traffic during {duration}s observation window...")
+            
+            env = os.environ.copy()
+            env["DB_NAME"] = os.getenv("DB_NAME")
+            env["PYTHONPATH"] = "src"
+            
+            procs = []
+            procs.append(subprocess.Popen(
+                [sys.executable, "scripts/simulate_workload.py", 
+                 "--dml-dir", "workload/queries_tpcc_write",
+                 "--no-reads", "--rounds", "100"],
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            ))
+            
+            procs.append(subprocess.Popen(
+                [sys.executable, "scripts/simulate_workload.py", 
+                 "--dml-dir", "workload/queries_tpcc_balance",
+                 "--rounds", "100"],
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            ))
+            
+            for p in procs:
+                p.wait()
 
         # --- Capture both after-snapshots immediately when observation window ends ---
-        try:
-            snap_after_reads = take_snapshot(conn)
-        except Exception as e:
-            print(f"[Workload] Error: Failed to capture pg_stat_statements after-snapshot: {e}")
-            return set(), [], {}, None
+        snap_after_reads = None
+        if hasattr(wl_module, "take_snapshot"):
+            try:
+                snap_after_reads = wl_module.take_snapshot(conn)
+            except Exception as e:
+                print(f"[Workload] Error: Failed to capture after-snapshot: {e}")
+                return set(), [], {}, None
 
         snap_after_writes = None
         if wp_enabled and wp_estimator and snap_before_writes:
@@ -229,7 +258,18 @@ def run_auto_index_selector(
                 return set(), [], {}, None
 
         # --- 3. Extract Read & Write Workload Deltas Immediately ---
-        W, schema, query_weights = get_delta_workload(conn, snap_before_reads, snap_after_reads)
+        if hasattr(wl_module, "get_delta_workload"):
+            W, schema, query_weights = wl_module.get_delta_workload(conn, snap_before_reads, snap_after_reads)
+        else:
+            res = wl_module.getWorkload()
+            if len(res) == 3 and isinstance(res[1], str):
+                W, _, schema = res
+                query_weights = {q: 1.0 for q in W}
+            elif len(res) == 3:
+                W, schema, query_weights = res
+            else:
+                W, schema = res[0], res[1]
+                query_weights = {q: 1.0 for q in W}
         if not W:
             if duration == 0:
                 print("[Workload] Error: Observation window duration is 0s and no active queries were observed between snapshots.")
@@ -255,7 +295,7 @@ def run_auto_index_selector(
                 print(f"\n[WritePenalty] Initialized dynamic penalty evaluator across {len(write_delta)} tables ({total_dml} total DML modifications).")
 
         # --- 4. Candidate Generation ---
-        raw_cands = cg_module.generateCandidateIndexes(W, schema)
+        raw_cands = cg_module.generateCandidateIndexes(conn, W, schema)
         candidateIndexes = _normalise_candidates(raw_cands)
         total_candidates = sum(len(v) for v in candidateIndexes.values()) if isinstance(candidateIndexes, dict) else len(candidateIndexes)
         if verbose:

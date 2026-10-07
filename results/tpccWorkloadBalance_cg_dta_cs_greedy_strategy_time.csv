@@ -1,0 +1,2 @@
+workload,candidate_generation,config_selection,cg_time_seconds,cs_time_seconds,total_time_seconds
+tpccWorkloadBalance,cg_dta,cs_greedy,0.127722,24.002035,24.129757

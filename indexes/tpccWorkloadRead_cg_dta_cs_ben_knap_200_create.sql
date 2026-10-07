@@ -1,0 +1,7 @@
+create index on item(i_id);
+create index on item(i_id,i_name);
+create index on order_line(ol_amount);
+create index on stock(s_i_id,s_w_id,s_quantity);
+create index on stock(s_quantity);
+create index on stock(s_w_id,s_i_id,s_quantity);
+create index on stock(s_w_id,s_quantity);

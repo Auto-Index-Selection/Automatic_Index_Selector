@@ -73,7 +73,7 @@ def measure_read_queries(conn, queries: List[Tuple[str, str]], iterations: int =
                     cur.execute(sql)
                     if cur.description:
                         cur.fetchall()
-                conn.commit()
+                conn.rollback()
             except Exception:
                 conn.rollback()
 
@@ -90,7 +90,7 @@ def measure_read_queries(conn, queries: List[Tuple[str, str]], iterations: int =
                         cur.fetchall()
                     elapsed_ms = (time.perf_counter() - t0) * 1000.0
                     per_query_passes[label].append(elapsed_ms)
-                conn.commit()
+                conn.rollback()
             except Exception as e:
                 conn.rollback()
                 logger.warning("Query %s failed during measurement: %s", label, e)
@@ -121,7 +121,7 @@ def measure_dml_latency(conn, sample_count: int = 50, seed: int = 42) -> float:
                 timings.append((time.perf_counter() - t0) * 1000.0)
             except Exception:
                 conn.rollback()
-        conn.commit()
+        conn.rollback()
     return sum(timings) / len(timings) if timings else 0.0
 
 

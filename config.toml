@@ -31,6 +31,8 @@ module = "cg_rule_based"
 #   - "config_sel"    : Greedy(m, k) enumeration algorithm (Chaudhuri & Narasayya)
 #                       Minimizes Workload Cost = ReadCost + WritePenalties.
 #                       (Recommended default)
+#   - "cs_greedy"     : Greedy(m, k) enumeration standalone module.
+#   - "cs_dta"        : DTA (AutoAdmin) configuration selection using Greedy(m, k).
 #   - "cs_drop"       : Whang (1985) Drop Heuristic algorithm with HypoPG index
 #                       size estimation and storage budget constraints.
 #   - "cs_extend"     : Extend Algorithm (Schlosser et al. ICDE 2019) with
@@ -62,7 +64,7 @@ storage_budget = "inf"
 #                                  query costs proportionally.
 #                                  Includes `PlaceholderResolver` ($1, $2 -> typed literals)
 #                                  so HypoPG can plan normalized queries without errors.
-module = "pgStatStatementsWorkload"
+module = "tpccWorkloadWrite"
 
 
 # ------------------------------------------------------------------------------
@@ -88,4 +90,4 @@ write_scale = 1.0
 #   - 10-30 : Pauses the pipeline for N seconds so external traffic (from your
 #             application, `pgbench`, or `python scripts/simulate_workload.py`)
 #             can run against the live database before `snap_after` is taken.
-window_duration_seconds = 60
+window_duration_seconds = 300

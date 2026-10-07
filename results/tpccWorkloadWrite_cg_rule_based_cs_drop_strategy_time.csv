@@ -1,0 +1,2 @@
+workload,candidate_generation,config_selection,cg_time_seconds,cs_time_seconds,total_time_seconds
+tpccWorkloadWrite,cg_rule_based,cs_drop,0.152074,67.474889,67.626963

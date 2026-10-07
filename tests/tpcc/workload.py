@@ -101,7 +101,7 @@ def run_tpcc_traffic(conn, duration_seconds: int = 10, rounds_per_query: int = 5
                     conn.rollback()
                     logger.debug("DML %s execution failed: %s", label, e)
 
-        conn.commit()
+        conn.rollback()
 
     # If duration remaining, sleep to complete observation window
     remaining = t_end - time.time()

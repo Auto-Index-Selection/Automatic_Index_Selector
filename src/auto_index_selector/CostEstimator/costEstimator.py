@@ -6,6 +6,7 @@ Core cost estimation module using HypoPG and the PostgreSQL optimizer.
 
 import logging
 import psycopg2
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -16,25 +17,62 @@ def clearHypotheticalIndexes(conn):
         cur.execute("SELECT hypopg_reset();")
 
 
+def split_sql_statements(sql: str) -> list[str]:
+    statements = []
+    current_statement = []
+    in_single_quote = False
+    in_double_quote = False
+    
+    for char in sql:
+        if char == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+        elif char == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+        
+        if char == ';' and not in_single_quote and not in_double_quote:
+            statements.append("".join(current_statement).strip())
+            current_statement = []
+        else:
+            current_statement.append(char)
+            
+    if current_statement:
+        stmt = "".join(current_statement).strip()
+        if stmt:
+            statements.append(stmt)
+            
+    return statements
+
+
 def getQueryCost(conn, query: str, fallback_cost: float = 1e9) -> float:
     """
     Returns PostgreSQL optimizer cost via EXPLAIN (FORMAT JSON).
     If a query fails or times out, safely rolls back and returns fallback_cost.
     """
-    explain_query = f"EXPLAIN (FORMAT JSON) {query}"
+    statements = split_sql_statements(query)
+    if not statements:
+        return 0.0
+
+    total_cost = 0.0
     try:
         with conn.cursor() as cur:
-            cur.execute(explain_query)
-            result = cur.fetchone()
-            if result and result[0]:
-                return float(result[0][0]["Plan"]["Total Cost"])
+            for stmt in statements:
+                cleaned_stmt = re.sub(r'--.*$', '', stmt, flags=re.MULTILINE)
+                cleaned_stmt = re.sub(r'/\*.*?\*/', '', cleaned_stmt, flags=re.DOTALL)
+                
+                if not cleaned_stmt.strip():
+                    continue
+
+                explain_query = f"EXPLAIN (FORMAT JSON) {stmt}"
+                cur.execute(explain_query)
+                result = cur.fetchone()
+                if result and result[0]:
+                    total_cost += float(result[0][0]["Plan"]["Total Cost"])
+        return total_cost
     except Exception as exc:
         if conn:
             conn.rollback()
         logger.warning("Query cost estimation failed or timed out: %s. Assigned fallback cost.", exc)
         return fallback_cost
-
-    return fallback_cost
 
 
 def createCompositeHypoIndexes(conn, configuration):

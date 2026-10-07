@@ -2,114 +2,81 @@ from typing import *
 import sqlglot as sg
 from ordered_set import OrderedSet
 from collections import OrderedDict
-def _get_alias_map(parsed_query) -> Dict[str, str]:
-    """Map alias -> actual_table_name and table_name -> table_name."""
-    alias_map = {}
-    for table_exp in parsed_query.find_all(sg.exp.Table):
-        t_name = table_exp.name
-        if not t_name:
-            continue
-        alias = table_exp.alias
-        if alias:
-            alias_map[alias] = t_name
-        alias_map[t_name] = t_name
-    return alias_map
 
-
-def normalizeColumn(column_node_or_name, schema: Dict, alias_map: Optional[Dict[str, str]] = None) -> str:
+def normalizeColumn(column: str, schema: Dict) -> str:
     '''
-    Input:
-        column_node_or_name : sg.exp.Column or string
+    Input 
+        column : string
         schema : Dict
-        alias_map : Dict[alias, table_name]
-    Output:
+    Output 
         result : table.[column]
     '''
-    if isinstance(column_node_or_name, sg.exp.Column):
-        col_name = column_node_or_name.name
-        tbl_ref = column_node_or_name.table
-    else:
-        col_name = str(column_node_or_name)
-        tbl_ref = None
+    result = ""
+    for table,attrs in schema.items():
+        if column in attrs.keys():
+            result = f'{table}.[{column}]'
+    return result
 
-    # 1. If explicit table/alias is present on the column
-    if tbl_ref and alias_map:
-        real_tbl = alias_map.get(tbl_ref, tbl_ref)
-        if real_tbl in schema and col_name in schema[real_tbl]:
-            return f'{real_tbl}.[{col_name}]'
-
-    # 2. If table alias map exists from current query, check tables present in the query
-    if alias_map:
-        for real_tbl in alias_map.values():
-            if real_tbl in schema and col_name in schema[real_tbl]:
-                return f'{real_tbl}.[{col_name}]'
-
-    # 3. Fallback: search all schema tables
-    for table, attrs in schema.items():
-        if col_name in attrs.keys():
-            return f'{table}.[{col_name}]'
-
-    return ""
-
-
-def getJoinCols(q: str, schema: Dict) -> OrderedSet:
+def getJoinCols(q: str, schema: Dict) ->OrderedSet:
     result = OrderedSet()
     parsed_query = sg.parse_one(q)
-    alias_map = _get_alias_map(parsed_query)
 
+    # extract joins
     for joins in parsed_query.find_all(sg.exp.Join):
         on_clause = joins.args.get("on")
         if on_clause:
             for column in on_clause.find_all(sg.exp.Column):
-                normalized_col = normalizeColumn(column, schema, alias_map)
-                if normalized_col:
-                    result.add(normalized_col)
+                normalized_col = normalizeColumn(column.name, schema)
+                if normalized_col == '':
+                    continue
+                result.add(normalized_col)
     return result
 
-
-def getEqCols(q: str, schema: Dict) -> OrderedSet:
+def getEqCols(q: str, schema: Dict) ->OrderedSet:
     result = OrderedSet()
     parsed_query = sg.parse_one(q)
-    alias_map = _get_alias_map(parsed_query)
+    # extract equality column in where (no having, join)
 
     for where in parsed_query.find_all(sg.exp.Where):
         if where:
             for eq in where.find_all(sg.exp.EQ):
                 for column in eq.find_all(sg.exp.Column):
-                    normalized_col = normalizeColumn(column, schema, alias_map)
-                    if normalized_col:
-                        result.add(normalized_col)
+                    normalized_col = normalizeColumn(column.name, schema)
+                    if normalized_col == '':
+                        continue
+                    result.add(normalized_col)
     return result
 
-
-def getRangeCols(q: str, schema: Dict) -> OrderedSet:
+def getRangeCols(q: str, schema: Dict) ->OrderedSet:
     result = OrderedSet()
     parsed_query = sg.parse_one(q)
-    alias_map = _get_alias_map(parsed_query)
     range_operators = (sg.exp.GT, sg.exp.GTE, sg.exp.LT, sg.exp.LTE)
-
     for where in parsed_query.find_all(sg.exp.Where):
         if where:
-            for range_op in where.find_all(range_operators):
-                for column in range_op.find_all(sg.exp.Column):
-                    normalized_col = normalizeColumn(column, schema, alias_map)
-                    if normalized_col:
-                        result.add(normalized_col)
+            for range in where.find_all(range_operators):
+                for column in range.find_all(sg.exp.Column):
+                    normalized_col = normalizeColumn(column.name, schema)
+                    if normalized_col == '':
+                        continue
+                    result.add(normalized_col)
     return result
 
-
-def getOCols(q: str, schema: Dict) -> OrderedSet:
+def getOCols(q: str, schema: Dict) ->OrderedSet:
     result = OrderedSet()
     parsed_query = sg.parse_one(q)
-    alias_map = _get_alias_map(parsed_query)
     group_order = (sg.exp.Group, sg.exp.Order)
-
-    for go in parsed_query.find_all(group_order):
-        for column in go.find_all(sg.exp.Column):
-            normalized_col = normalizeColumn(column, schema, alias_map)
-            if normalized_col:
-                result.add(normalized_col)
+    for range in parsed_query.find_all(group_order):
+        for column in range.find_all(sg.exp.Column):
+               normalized_col = normalizeColumn(column.name, schema)
+               if normalized_col == '':
+                   continue
+               result.add(normalized_col)
     return result
+
+def _stripBrackets(label: str) -> Tuple[str, str]:
+    '''table.[col] -> (table, col)'''
+    table, bracketed = label.split('.', 1)
+    return table, bracketed[1:-1]
 
 def applyRule1(J, EQ, RANGE):
     result = OrderedSet()
@@ -122,125 +89,51 @@ def applyRule2(O:OrderedSet) ->OrderedSet:
     tables = OrderedSet()
     for ci in O:
         tables.add(ci.split('.')[0])
-    # print(tables)
     if len(tables) != 1:
         return result
     table = next(iter(O)).split('.')[0]
-    # print(table)
     columns = "["
     for ci in O:
-        # print(ci)
-        col = ci.split('.')[1]\
-            [1:-1]
+        col = ci.split('.')[1][1:-1]
         columns += col + ','
-    # print(columns)
     columns = columns[:-1] + ']'
-    # print(columns)
     result.add(f'{table}.{columns}')
-    # print(result)
     return result
 
 def applyRule3(q, schema):
     result = OrderedSet()
     parsed_query = sg.parse_one(q)
-    alias_map = _get_alias_map(parsed_query)
 
     temp = OrderedDict()
     # extract joins
     for joins in parsed_query.find_all(sg.exp.Join):
-        # print(joins)
         temp_dict = OrderedDict()
         on_clause = joins.args.get("on")
-        # print(on_clause)
         if on_clause:
             for column in on_clause.find_all(sg.exp.Column):
-                # print(f'\tname : {column.name}')
-                normalized_col = normalizeColumn(column, schema, alias_map)
-                if not normalized_col:
+                normalized_col = normalizeColumn(column.name, schema)
+                if normalized_col == '':
                     continue
                 table = normalized_col.split('.')[0]
-                # column = normalized_col.split('.')[1]
                 if table not in temp_dict.keys():
                     temp_dict[table] = column.name
                 else:
                     temp_dict[table] += (',' + column.name)
-                # print(temp_dict)
 
             for key, item in temp_dict.items():
                 if key not in temp.keys():
                     temp[key] = OrderedSet()
                 temp[key].add(item)
 
-    # print(temp) 
     for table, idxs in temp.items():
+        columns = f'{table}.['
         for idx in idxs:
-            col_parts = [c.strip() for c in idx.split(',') if c.strip()]
-            if col_parts:
-                result.add(f"{table}.[{','.join(col_parts)}]")
+            for col in idx.split(','):
+                columns += col + ','
+        columns = columns[:-1] + ']'
+        result.add(columns)
     return result
 
-# def applyRule4(J, EQ, RANGE):
-    result = OrderedSet()
-
-    j = OrderedDict()
-    eq = OrderedDict()
-    r = OrderedDict()
-
-    for idx in J:
-        # print(idx)
-        table = idx.split('.')[0]
-        columns = idx.split('.')[1]\
-            [1:-1]
-        if table not in j.keys():
-            j[table] = []
-        j[table].append(columns)
-    
-    # print(j)
-
-    for idx in EQ:
-        # print(idx)
-        table = idx.split('.')[0]
-        columns = idx.split('.')[1]\
-            [1:-1]
-        if table not in eq.keys():
-            eq[table] = []
-        eq[table].append(columns)
-        
-    # print(eq)
-
-    for idx in RANGE:
-        # print(idx)
-        table = idx.split('.')[0]
-        columns = idx.split('.')[1]\
-            [1:-1]
-        if table not in r.keys():
-            r[table] = []
-        r[table].append(columns)
-        
-    # print(r)
-    # print()
-    # j + eq + r
-    for table, candidates in j.items():
-        if table in eq.keys() and table in r.keys():
-            print(j[table])
-            print(eq[table])
-            print(r[table])
-            print()
-    print('-'*82)
-    # eq + r
-
-
-    # j + r
-
-
-    # j + eq
-
-
-    return result
-
-# def applyRule5():
-    result = OrderedSet()
-    return result
 
 def applyRule4(J: OrderedSet, EQ: OrderedSet, RANGE: OrderedSet) -> OrderedSet:
     result = OrderedSet()
@@ -347,20 +240,19 @@ def setToDict(s:OrderedSet) -> Dict :
     Input
         s : set with elements of form 'table.[column(s)]'
     Output
-        result : dict with elements '{table : [column(s)}'
+        result : dict with elements '{table : [column(s)]}'
     '''
     result = dict()
     for element in s:
         table = element.split('.')[0]
-        columns_str = element.split('.')[1]\
-            [1:-1] # remove [ and ]
+        columns_str = element.split('.')[1][1:-1] # remove [ and ]
         columns = columns_str.split(',')
         if table not in result.keys():
             result[table] = []
         result[table].append(columns)
     return result
 
-def generateCandidateIndexes(W: List, schema: Dict) -> Dict:
+def generateCandidateIndexes(conn, W: List, schema: Dict) -> Dict:
     '''
     Input : 
         W -> workload as a List
@@ -379,7 +271,6 @@ def generateCandidateIndexes(W: List, schema: Dict) -> Dict:
     for query in W:
         join_cols = getJoinCols(query, schema)
         J |= join_cols    
-        # print(join_cols)
 
         eq_cols = getEqCols(query, schema)
         EQ |= eq_cols 
@@ -393,22 +284,21 @@ def generateCandidateIndexes(W: List, schema: Dict) -> Dict:
         USED = J | EQ | RANGE | O
     
         # rule 1
-        cis |= applyRule1(J, EQ, RANGE) #done
+        cis |= applyRule1(J, EQ, RANGE) 
 
         # rule 2 
-        cis |= applyRule2(O) #done
+        cis |= applyRule2(O) 
 
         # rule 3
-        rule3_attr = applyRule3(query, schema) #done
+        rule3_attr = applyRule3(query, schema) 
         cis |= rule3_attr
+        
         # rule 4
-        cis |= applyRule4(J 
-                        #    rule3_attr
-                          , EQ, RANGE) 
+        cis |= applyRule4(J, EQ, RANGE) 
 
         # rule 5
         # cis |= applyRule5(cis, USED)
-    # print(cis)
+
     result = setToDict(cis)
 
     return result

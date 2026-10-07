@@ -5,298 +5,300 @@ Reference: Schlosser, Kossmann, Boissier.
 "Efficient Scalable Multi-Attribute Index Selection Using Recursive Strategies."
 ICDE 2019 (Algorithm 1, Heuristic H6).
 
-Builds a multi-attribute index configuration step by step:
-  - Option A: Add a new single-attribute index.
-  - Option B: Morph an existing index by appending an attribute (k -> k + [col]).
-Picks the action with highest marginal cost reduction per unit of additional memory (ΔCost / ΔSize).
-Integrated with HypoPG, write penalties, and query frequency weights.
+Candidate generation is handled by cg_extend.generateCandidateIndexes(), which
+extracts index-relevant columns from the workload SQL.  This module receives
+the resulting candidate_dict and runs the Extend algorithm on it.
+
+Algorithm steps
+---------------
+1. Seed: from the candidate set, pick the single index with best ΔCost / ΔSize.
+2. Expand: each round, try
+       Option A — Add a new candidate index not yet in the configuration.
+       Option B — Morph an existing index by appending a column
+                  (replace (table, (c1,)) with (table, (c1, c2)) if
+                  (table, (c1, c2)) exists in the candidate set).
+   Accept the move with the highest ΔCost / ΔSize that also passes the
+   minimum-improvement threshold.  Stop when no move qualifies.
+
+Cost evaluation uses estimateWorkloadCostForConfig sequentially, matching cs_drop / cs_greedy.
+
+selectConfigurations() sweeps all budgets with a shared
+cost_cache — same pattern as cs_drop.selectConfigurations().
 """
 
-from itertools import combinations
-import logging
-from typing import Dict, List, Optional, Set, Tuple, Any
-import psycopg2
+from collections import defaultdict
+from typing import Dict, Tuple
 
-from ..CostEstimator.costEstimator import estimateWorkloadCostForConfig
-from .cs_drop import estimateIndexSize, buildSizeMap
+from auto_index_selector.CostEstimator.costEstimator import (
+    estimateWorkloadCostForConfig,
+)
+from .cs_drop import buildSizeMap, estimateIndexSize
+from .config_sel import flattenCandidateIndexes
 
-logger = logging.getLogger(__name__)
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
 
-Index = Tuple[str, Tuple[str, ...]]          # (table_name, (col1, col2, ...))
-IndexSet = List[Index]
-CandidatePool = List[Tuple[str, str]]        # [(table, col), ...]
-
-
-def extractCandidatePool(candidate_dict: Any) -> CandidatePool:
-    """Extract unique (table, single_column) candidate attributes from candidate structure."""
-    pool: List[Tuple[str, str]] = []
-    seen: Set[Tuple[str, str]] = set()
-
-    if isinstance(candidate_dict, dict):
-        for table, col_lists in candidate_dict.items():
-            for cols in col_lists:
-                for col in cols:
-                    pair = (table, col)
-                    if pair not in seen:
-                        seen.add(pair)
-                        pool.append(pair)
-    elif isinstance(candidate_dict, (list, tuple, set)):
-        for item in candidate_dict:
-            if isinstance(item, (list, tuple)) and len(item) == 2:
-                table, cols = item
-                if isinstance(cols, (list, tuple)):
-                    for col in cols:
-                        pair = (table, col)
-                        if pair not in seen:
-                            seen.add(pair)
-                            pool.append(pair)
-                elif isinstance(cols, str):
-                    pair = (table, cols)
-                    if pair not in seen:
-                        seen.add(pair)
-                        pool.append(pair)
-    return pool
+def _mb(x: float) -> float:
+    return x / (1024.0 ** 2)
 
 
-class ExtendAlgorithm:
+# ---------------------------------------------------------------------------
+# Inner algorithm
+# ---------------------------------------------------------------------------
+
+def _extend_inner(conn, W, candidate_indexes, size_cache, cost_cache,
+                  storage_budget, max_index_width=3,
+                  min_cost_improvement=1.003, verbose=False,
+                  write_penalties=None, query_weights=None):
     """
-    Implements Algorithm 1 (Extend / H6) from the ICDE 2019 paper.
+    Extend algorithm core.
     """
-
-    def __init__(
-        self,
-        conn,
-        W: List[str],
-        budget_mb: float = 500.0,
-        max_index_width: int = 3,
-        min_cost_improvement: float = 1.003,
-        write_penalties: Optional[Dict[Tuple[str, Tuple[str, ...]], float]] = None,
-        query_weights: Optional[Dict[str, float]] = None,
-        cost_cache: Optional[Dict[Any, float]] = None,
-        size_cache: Optional[Dict[Any, float]] = None,
-        verbose: bool = False,
-    ):
-        self.conn = conn
-        self.W = W
-        self.budget_mb = float(budget_mb)
-        self.max_index_width = max_index_width
-        self.min_cost_improvement = min_cost_improvement
-        self.write_penalties = write_penalties or {}
-        self.query_weights = query_weights or {}
-        self.cost_cache = cost_cache if cost_cache is not None else {}
-        self.size_cache = size_cache if size_cache is not None else {}
-        self.verbose = verbose
-
-    def _estimate_size_mb(self, table: str, cols: Tuple[str, ...]) -> float:
-        idx_key = (table, cols)
-        if idx_key not in self.size_cache:
-            size_bytes = estimateIndexSize(self.conn, table, cols)
-            self.size_cache[idx_key] = size_bytes / (1024.0 * 1024.0)
-        return self.size_cache[idx_key]
-
-    def _calculate_total_size_mb(self, I: IndexSet) -> float:
-        return sum(self._estimate_size_mb(table, cols) for table, cols in I)
-
-    def _calculate_cost(self, I: IndexSet) -> float:
-        key = frozenset((table, tuple(cols)) for table, cols in I)
-        if key not in self.cost_cache:
-            self.cost_cache[key] = estimateWorkloadCostForConfig(
-                self.conn,
-                self.W,
-                key,
-                query_weights=self.query_weights,
-                write_penalties=self.write_penalties,
+    def cost(cfg):
+        if cfg not in cost_cache:
+            cost_cache[cfg] = estimateWorkloadCostForConfig(
+                conn, W, cfg,
+                query_weights=query_weights,
+                write_penalties=write_penalties
             )
-        return self.cost_cache[key]
+        return cost_cache[cfg]
 
-    def run(self, candidates: CandidatePool) -> Tuple[IndexSet, float, float]:
-        """Execute Extend algorithm."""
-        if not self.W or not candidates:
-            return [], self._calculate_cost([]), 0.0
+    def batch_cost_cached(cfgs):
+        results = {}
+        for c in cfgs:
+            results[c] = cost(c)
+        return results
 
-        # Step 1: Baseline cost F0 = Cost(empty set)
-        I: IndexSet = []
-        F0 = self._calculate_cost(I)
-        logger.info(f"[Extend] Baseline workload cost F(∅) = {F0:.4f}")
+    def size_bytes(cfg):
+        return sum(size_cache[idx] for idx in cfg)
 
-        # Step 2: Seed Selection
-        I, F_current, total_size = self._seed_selection(candidates, F0)
-        if not I:
-            logger.info("[Extend] No beneficial seed found. Returning empty configuration.")
-            return [], F0, 0.0
+    def passes(new_cost, cur_cost):
+        return new_cost * min_cost_improvement < cur_cost
 
-        logger.info(f"[Extend] Seed chosen: {I[0][0]}({",".join(I[0][1])}) | Cost={F_current:.2f} | Size={total_size:.2f} MB")
+    # -----------------------------------------------------------------------
+    # Step 1: Baseline — empty configuration
+    # -----------------------------------------------------------------------
+    S = frozenset()
+    F_current = cost(S)
 
-        # Step 3: Recursive Expansion Loop (Add & Morph)
-        I, F_current, total_size = self._expansion_loop(candidates, I, F_current, total_size)
-        return I, F_current, total_size
+    if verbose:
+        print(f"  [Extend] baseline cost={F_current:,.2f}  "
+              f"budget={_mb(storage_budget):,.1f} MB")
 
-    def _seed_selection(self, candidates: CandidatePool, F0: float) -> Tuple[IndexSet, float, float]:
-        best_seed: Optional[Index] = None
-        best_ratio = -float("inf")
-        best_Fi = F0
-        best_size = 0.0
+    # -----------------------------------------------------------------------
+    # Step 2: Seed — pick the best single-column candidate index
+    # -----------------------------------------------------------------------
+    seed_trials = [
+        frozenset([idx]) for idx in candidate_indexes
+        if size_cache.get(idx, float("inf")) <= storage_budget
+    ]
 
-        for table, col in candidates:
-            cols = (col,)
-            size_mb = self._estimate_size_mb(table, cols)
-            if size_mb > self.budget_mb:
+    if not seed_trials:
+        if verbose:
+            print("  [Extend] no candidate fits in budget — returning empty config")
+        return S
+
+    seed_costs = batch_cost_cached(seed_trials)
+    best_seed, best_seed_cost, best_seed_ratio = None, F_current, -float("inf")
+
+    for trial, tcost in seed_costs.items():
+        delta = F_current - tcost
+        if delta <= 0 or not passes(tcost, F_current):
+            continue
+        sz = size_bytes(trial)
+        ratio = delta / max(sz, 1.0)
+        if ratio > best_seed_ratio:
+            best_seed_ratio, best_seed, best_seed_cost = ratio, trial, tcost
+
+    if best_seed is None:
+        if verbose:
+            print("  [Extend] no beneficial seed — returning empty config")
+        return S
+
+    S, F_current = best_seed, best_seed_cost
+    if verbose:
+        print(f"  [Extend] seed={sorted(S)}  cost={F_current:,.2f}  "
+              f"size={_mb(size_bytes(S)):,.1f} MB")
+
+    # -----------------------------------------------------------------------
+    # Step 3: Expansion loop — Add (Option A) or Morph (Option B)
+    # -----------------------------------------------------------------------
+    iteration = 0
+    while True:
+        iteration += 1
+        trials: Dict[frozenset, Tuple[str, float]] = {}
+        current_size = size_bytes(S)
+
+        for idx in candidate_indexes:
+            table, cols = idx
+
+            # --- Option A: Add this candidate index if not already in S -------
+            if idx not in S:
+                new_S = S | frozenset([idx])
+                new_sz = size_bytes(new_S)
+                if new_sz <= storage_budget:
+                    trials[new_S] = (
+                        f"ADD {table}({','.join(cols)})",
+                        new_sz - current_size,
+                    )
+
+            # --- Option B: Morph — replace an existing index on the same table
+            # with this candidate index by appending its column to the existing index.
+            # Only append if the column is not already in the index.
+            for existing in list(S):
+                e_table, e_cols = existing
+                if e_table != table:
+                    continue
+                if len(cols) != 1:
+                    continue
+                
+                c_new = cols[0]
+                if c_new in e_cols:
+                    continue
+                    
+                new_cols = tuple(list(e_cols) + [c_new])
+                if len(new_cols) > max_index_width:
+                    continue
+                    
+                new_idx = (table, new_cols)
+                
+                # Check size_cache or calculate it
+                if new_idx not in size_cache:
+                    try:
+                        from .cs_drop import estimateIndexSize
+                        size_cache[new_idx] = estimateIndexSize(conn, table, new_cols)
+                    except Exception:
+                        continue
+                        
+                new_S = (S - frozenset([existing])) | frozenset([new_idx])
+                new_sz = (current_size
+                          - size_cache[existing]
+                          + size_cache[new_idx])
+                if new_sz <= storage_budget:
+                    trials[new_S] = (
+                        f"MORPH {e_table}({','.join(e_cols)})"
+                        f"->({','.join(new_cols)})",
+                        new_sz - current_size,
+                    )
+
+        if not trials:
+            if verbose:
+                print(f"  [Extend] iter {iteration}: no valid moves — done")
+            break
+
+        trial_costs = batch_cost_cached(list(trials.keys()))
+
+        best_cfg, best_ratio = None, -float("inf")
+        best_cost_val, best_label = F_current, ""
+
+        for trial_cfg, (label, delta_size) in trials.items():
+            tcost = trial_costs[trial_cfg]
+            delta_cost = F_current - tcost
+            if delta_cost <= 0 or not passes(tcost, F_current):
                 continue
-
-            candidate_I: IndexSet = [(table, cols)]
-            Fi = self._calculate_cost(candidate_I)
-            delta_cost = F0 - Fi
-
-            if delta_cost <= 0:
-                continue
-
-            ratio = delta_cost / (size_mb if size_mb > 0 else 0.001)
+            ratio = delta_cost / max(delta_size, 1.0)
             if ratio > best_ratio:
-                best_ratio = ratio
-                best_seed = (table, cols)
-                best_Fi = Fi
-                best_size = size_mb
+                best_ratio, best_cfg, best_cost_val, best_label = (
+                    ratio, trial_cfg, tcost, label
+                )
 
-        if best_seed is None:
-            return [], F0, 0.0
+        if best_cfg is None:
+            if verbose:
+                print(f"  [Extend] iter {iteration}: no improving move — done")
+            break
 
-        return [best_seed], best_Fi, best_size
+        S, F_current = best_cfg, best_cost_val
+        if verbose:
+            print(f"  [Extend] iter {iteration}: {best_label}  "
+                  f"cost={F_current:,.2f}  size={_mb(size_bytes(S)):,.1f} MB")
 
-    def _expansion_loop(
-        self,
-        candidates: CandidatePool,
-        I: IndexSet,
-        F_current: float,
-        total_size: float
-    ) -> Tuple[IndexSet, float, float]:
-        iteration = 0
-        while True:
-            iteration += 1
-            best_new_I: Optional[IndexSet] = None
-            best_new_cost: Optional[float] = None
-            best_new_size: Optional[float] = None
-            best_ratio = -float("inf")
-            best_action = ""
+    if verbose:
+        print(f"  [Extend] RESULT |S|={len(S)}  "
+              f"size={_mb(size_bytes(S)):,.1f} MB  "
+              f"of {_mb(storage_budget):,.1f} MB  cost={F_current:,.2f}")
 
-            for table, col in candidates:
-                # Option A: Add new single-attribute index
-                if self._can_add_new(I, table, col):
-                    new_size_a = total_size + self._estimate_size_mb(table, (col,))
-                    if new_size_a <= self.budget_mb:
-                        new_I_a = I + [(table, (col,))]
-                        F_a = self._calculate_cost(new_I_a)
-                        ratio_a = self._compute_ratio(F_current - F_a, new_size_a - total_size)
-                        if (
-                            ratio_a is not None
-                            and ratio_a > best_ratio
-                            and self._passes_threshold(F_a, F_current)
-                        ):
-                            best_ratio = ratio_a
-                            best_new_I = new_I_a
-                            best_new_cost = F_a
-                            best_new_size = new_size_a
-                            best_action = f"ADD {table}({col})"
-
-                # Option B: Morph existing index (append col)
-                for k_idx, (k_table, k_cols) in enumerate(I):
-                    if k_table != table or len(k_cols) >= self.max_index_width or col in k_cols:
-                        continue
-
-                    new_cols = k_cols + (col,)
-                    new_I_b = list(I)
-                    new_I_b[k_idx] = (k_table, new_cols)
-
-                    old_size = self._estimate_size_mb(k_table, k_cols)
-                    new_idx_size = self._estimate_size_mb(k_table, new_cols)
-                    new_size_b = total_size - old_size + new_idx_size
-
-                    if new_size_b > self.budget_mb:
-                        continue
-
-                    F_b = self._calculate_cost(new_I_b)
-                    ratio_b = self._compute_ratio(F_current - F_b, new_size_b - total_size)
-                    if (
-                        ratio_b is not None
-                        and ratio_b > best_ratio
-                        and self._passes_threshold(F_b, F_current)
-                    ):
-                        best_ratio = ratio_b
-                        best_new_I = new_I_b
-                        best_new_cost = F_b
-                        best_new_size = new_size_b
-                        best_action = f"MORPH {k_table}({",".join(k_cols)}) -> ({",".join(new_cols)})"
-
-            if best_new_I is None:
-                break
-
-            logger.info(f"  [Extend] {best_action} -> Cost: {best_new_cost:.2f} | Size: {best_new_size:.2f} MB")
-            I = best_new_I
-            F_current = best_new_cost
-            total_size = best_new_size
-
-        return I, F_current, total_size
-
-    def _can_add_new(self, I: IndexSet, table: str, col: str) -> bool:
-        for k_table, k_cols in I:
-            if k_table == table and k_cols[0] == col:
-                return False
-        return True
-
-    def _compute_ratio(self, delta_cost: float, delta_size: float) -> Optional[float]:
-        if delta_cost <= 0:
-            return None
-        if delta_size <= 0:
-            return float("inf")
-        return delta_cost / delta_size
-
-    def _passes_threshold(self, F_candidate: float, F_current: float) -> bool:
-        return F_candidate * self.min_cost_improvement < F_current
+    return S
 
 
-def extendAlgorithm(
-    conn,
-    W: List[str],
-    candidate_dict: Any,
-    budget_mb: float = 500.0,
-    storage_budget: Optional[float] = None,
-    max_index_width: int = 3,
-    min_cost_improvement: float = 1.003,
-    write_penalties: Optional[Dict] = None,
-    query_weights: Optional[Dict] = None,
-    cost_cache: Optional[Dict] = None,
-    size_cache: Optional[Dict] = None,
-    verbose: bool = False,
-    **kwargs
-) -> frozenset:
+# ---------------------------------------------------------------------------
+# Shared setup
+# ---------------------------------------------------------------------------
+
+def _setup(conn, W, candidate_dict, size_cache, cost_cache):
     """
-    Public entry point for Extend Algorithm.
-    Returns frozenset[(table, (col1, ...))] matching standard configuration format.
+    Flatten candidates, build size map (single-col + likely morphed combos),
+    and return (candidate_indexes, size_cache, cost_cache).
     """
-    if storage_budget is not None and storage_budget != float("inf"):
-        budget_mb = float(storage_budget) / (1024.0 * 1024.0)
+    if cost_cache is None:
+        cost_cache = {}
 
-    candidates = extractCandidatePool(candidate_dict)
-    algo = ExtendAlgorithm(
-        conn=conn,
-        W=W,
-        budget_mb=budget_mb,
-        max_index_width=max_index_width,
-        min_cost_improvement=min_cost_improvement,
-        write_penalties=write_penalties,
-        query_weights=query_weights,
-        cost_cache=cost_cache,
-        size_cache=size_cache,
-        verbose=verbose,
+    candidate_indexes = flattenCandidateIndexes(candidate_dict)
+    size_cache = buildSizeMap(conn, candidate_indexes, size_cache)
+
+    # Removed O(N^2) size_cache pre-population for 2-column combinations.
+    # Sizes are now evaluated dynamically during the Morph step.
+
+    return candidate_indexes, size_cache, cost_cache
+
+
+# ---------------------------------------------------------------------------
+# Public API — single budget
+# ---------------------------------------------------------------------------
+
+def selectConfiguration(conn, W, candidate_dict, storage_budget,
+                        max_index_width=3, min_cost_improvement=1.003,
+                        cost_cache=None, size_cache=None,
+                        n_workers=None, db_name=None,
+                        write_penalties=None, query_weights=None, **kwargs):
+    """
+    Single-budget entry point.
+
+    candidate_dict must come from cg_extend.generateCandidateIndexes().
+    storage_budget is in BYTES (e.g. 500 * 1024**2 for 500 MB).
+    """
+    candidate_indexes, size_cache, cost_cache = _setup(
+        conn, W, candidate_dict, size_cache, cost_cache
     )
-    final_indexes, _, _ = algo.run(candidates)
-    return frozenset((table, tuple(cols)) for table, cols in final_indexes)
+
+    return _extend_inner(
+        conn, W, candidate_indexes, size_cache, cost_cache,
+        storage_budget, max_index_width, min_cost_improvement,
+        verbose=True, write_penalties=write_penalties, query_weights=query_weights
+    )
 
 
-def selectConfiguration(conn, W, candidate_dict, **kwargs) -> frozenset:
-    """Standard interface for configuration selection."""
-    return extendAlgorithm(conn, W, candidate_dict, **kwargs)
+# ---------------------------------------------------------------------------
+# Public API — multi-budget sweep
+# ---------------------------------------------------------------------------
 
+def selectConfigurations(conn, W, candidate_dict, storage_budgets_mb,
+                         max_index_width=3, min_cost_improvement=1.003,
+                         cost_cache=None, size_cache=None,
+                         n_workers=None, verbose=True, db_name=None,
+                         write_penalties=None, query_weights=None, **kwargs):
+    """
+    Run Extend for *multiple* storage budgets in a single pass.
+    """
+    candidate_indexes, size_cache, cost_cache = _setup(
+        conn, W, candidate_dict, size_cache, cost_cache
+    )
 
-def greedyMK(conn, W, candidate_dict, **kwargs) -> frozenset:
-    """Drop-in alias for greedyMK."""
-    return extendAlgorithm(conn, W, candidate_dict, **kwargs)
+    if verbose:
+        print(f"  [Extend] {len(candidate_indexes)} candidate indexes "
+              f"(from cg_extend)")
+
+    budgets_bytes = sorted(
+        [int(b * 1024 * 1024) for b in storage_budgets_mb], reverse=True
+    )
+
+    configs = {}
+    for budget in budgets_bytes:
+        if verbose:
+            print(f"\n=== Extend  budget={_mb(budget):,.0f} MB ===")
+        configs[budget] = _extend_inner(
+            conn, W, candidate_indexes, size_cache, cost_cache,
+            budget, max_index_width, min_cost_improvement, verbose,
+            write_penalties=write_penalties, query_weights=query_weights
+        )
+
+    return configs
